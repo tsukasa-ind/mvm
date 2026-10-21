@@ -42,6 +42,8 @@ export type Startup = {
   activeTabId: TabId;
   files: OpenedFile[];
   cliFiles: OpenedFile[];
+  /** `cliFiles` の追加先 */
+  cliTab: TabId;
 };
 
 export type Heading = { id: string; depth: number; text: string };

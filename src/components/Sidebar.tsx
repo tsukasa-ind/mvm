@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { assertNever, type FileEntry, type FileId, type Tab } from "../domain/types";
+import { assertNever, type FileEntry, type FileId, type Tab, type TabId } from "../domain/types";
 import { searchFiles } from "../lib/search";
 import { buildTree, type TreeNode } from "../lib/tree";
 
 type Props = {
   tab: Tab;
+  /** 「別のタブへ追加」の宛先 */
+  otherTabs: Tab[];
+  onAddToTab: (path: string, tabId: TabId) => void;
   files: Record<FileId, FileEntry>;
   onSelect: (id: FileId) => void;
   onClose: (id: FileId) => void;
@@ -42,10 +45,10 @@ const statusMark = (entry: FileEntry): string => {
   }
 };
 
-type RowProps = { entry: FileEntry; active: boolean; depth: number; onSelect: () => void; onClose: () => void };
+type RowProps = { entry: FileEntry; active: boolean; depth: number; onSelect: () => void; onClose: () => void; onContextMenu: (event: React.MouseEvent) => void };
 
-const FileRow = ({ entry, active, depth, onSelect, onClose }: RowProps) => (
-  <li className="group relative">
+const FileRow = ({ entry, active, depth, onSelect, onClose, onContextMenu }: RowProps) => (
+  <li className="group relative" onContextMenu={onContextMenu}>
     <button
       type="button"
       title={entry.file.path}
@@ -69,11 +72,29 @@ const FileRow = ({ entry, active, depth, onSelect, onClose }: RowProps) => (
   </li>
 );
 
-export const Sidebar = ({ tab, files, onSelect, onClose, onOpenFiles, onOpenFolder, open, onRequestOpen }: Props) => {
+export const Sidebar = ({ tab, otherTabs, onAddToTab, files, onSelect, onClose, onOpenFiles, onOpenFolder, open, onRequestOpen }: Props) => {
   const [view, setView] = useState<ViewMode>(readViewMode);
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const searchRef = useRef<HTMLInputElement>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null);
+
+  // メニューは外側のクリック、Esc、スクロールで閉じる
+  useEffect(() => {
+    if (menu === null) return;
+    const dismiss = () => setMenu(null);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") dismiss();
+    };
+    window.addEventListener("click", dismiss);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("blur", dismiss);
+    return () => {
+      window.removeEventListener("click", dismiss);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("blur", dismiss);
+    };
+  }, [menu]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -114,7 +135,20 @@ export const Sidebar = ({ tab, files, onSelect, onClose, onOpenFiles, onOpenFold
   const renderRow = (id: FileId, depth: number) => {
     const entry = files[id];
     return entry === undefined ? null : (
-      <FileRow key={id} entry={entry} active={id === tab.activeFileId} depth={depth} onSelect={() => onSelect(id)} onClose={() => onClose(id)} />
+      <FileRow
+        key={id}
+        entry={entry}
+        active={id === tab.activeFileId}
+        depth={depth}
+        onSelect={() => onSelect(id)}
+        onClose={() => onClose(id)}
+        onContextMenu={(event) => {
+          // 追加先のタブがないときは、既定のメニューを残す
+          if (otherTabs.length === 0) return;
+          event.preventDefault();
+          setMenu({ x: event.clientX, y: event.clientY, path: entry.file.path });
+        }}
+      />
     );
   };
 
@@ -207,6 +241,17 @@ export const Sidebar = ({ tab, files, onSelect, onClose, onOpenFiles, onOpenFold
           <ul>{view === "tree" ? renderNodes(tree, 0) : tab.fileIds.map((id) => renderRow(id, 0))}</ul>
         )}
       </div>
+      {menu !== null && (
+        <ul role="menu" style={{ left: menu.x, top: menu.y }} className="fixed z-50 min-w-40 rounded border border-neutral-300 bg-white py-1 text-sm shadow-lg dark:border-neutral-700 dark:bg-neutral-900">
+          {otherTabs.map((other) => (
+            <li key={other.id} role="none">
+              <button type="button" role="menuitem" onClick={() => onAddToTab(menu.path, other.id)} className="block w-full truncate px-3 py-1.5 text-left hover:bg-neutral-100 dark:hover:bg-neutral-800">
+                {`「${other.title}」タブへ追加`}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </nav>
   );
 };

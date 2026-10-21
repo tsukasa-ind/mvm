@@ -13,10 +13,14 @@ type ReadErrorPayload = { kind: "missing" } | { kind: "failed"; message: string 
 export const getStartup = (): Promise<Startup> => invoke("get_startup");
 
 /** `recursive` はディレクトリを Markdown ファイルに展開するときの再帰指定 */
-export const openPaths = (baseDir: string, paths: string[], recursive: boolean): Promise<OpenedFile[]> =>
-  invoke("open_paths", { baseDir, paths, recursive });
+export const openPaths = (baseDir: string, paths: string[], recursive: boolean, tabId: TabId): Promise<OpenedFile[]> =>
+  invoke("open_paths", { baseDir, paths, recursive, tabId });
 
-export const closeFile = (id: FileId): Promise<void> => invoke("close_file", { id });
+/** タブからファイルを外す。どのタブも持たなくなったときだけ、Rust が登録と監視を解除する */
+export const closeFile = (tabId: TabId, id: FileId): Promise<void> => invoke("close_file", { tabId, id });
+
+/** タブの監視パターンと閉じた履歴を消す */
+export const closeTab = (tabId: TabId): Promise<void> => invoke("close_tab", { tabId });
 
 export const saveSession = (session: SessionPayload): Promise<void> => invoke("save_session", { ...session });
 
@@ -29,7 +33,7 @@ export const readMarkdown = async (id: FileId): Promise<ReadResult> => {
   }
 };
 
-export type OpenFilesEvent = { files: OpenedFile[]; tabId?: TabId; select: boolean };
+export type OpenFilesEvent = { files: OpenedFile[]; tabId: TabId; select: boolean };
 
 export type ReadBytesResult = { kind: "ok"; bytes: Uint8Array } | { kind: "missing" } | { kind: "failed"; message: string };
 

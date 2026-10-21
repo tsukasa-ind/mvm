@@ -15,16 +15,24 @@ pub struct CliOptions {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ParsedArgs {
     pub options: CliOptions,
+    /// 追加先のタブ名 (`-t` / `--tab`)。指定がなければアクティブなタブ
+    pub tab: Option<String>,
     pub targets: Vec<String>,
 }
 
 /// argv (先頭はプログラム名) を解釈する。未知のフラグは無視する (GTK 等が付与するものを拒否しないため)。
 pub fn parse_args(args: &[String]) -> ParsedArgs {
     let mut parsed = ParsedArgs::default();
-    for arg in args.iter().skip(1) {
+    let mut rest = args.iter().skip(1);
+    while let Some(arg) = rest.next() {
         match arg.as_str() {
             "-R" | "--recursive" => parsed.options.recursive = true,
             "-w" | "--watch" => parsed.options.watch = true,
+            "-t" | "--tab" => parsed.tab = rest.next().cloned().filter(|name| !name.is_empty()),
+            flag if flag.starts_with("--tab=") => {
+                parsed.tab =
+                    Some(flag["--tab=".len()..].to_string()).filter(|name| !name.is_empty());
+            }
             flag if flag.starts_with('-') => {}
             target => parsed.targets.push(target.to_string()),
         }
@@ -79,6 +87,7 @@ fn expand_target(
             base: path.clone(),
             recursive: options.recursive,
             glob: None,
+            tab: String::new(),
         };
         (scan_pattern(&pattern), Some(pattern))
     } else {
@@ -112,6 +121,7 @@ fn expand_glob(target: &str, cwd: &Path) -> (Vec<PathBuf>, Option<WatchPattern>)
         base,
         recursive,
         glob: Some(pattern_string),
+        tab: String::new(),
     };
     (scan_pattern(&pattern), Some(pattern))
 }
@@ -196,6 +206,24 @@ mod tests {
             }
         );
         assert_eq!(parsed.targets, vec!["docs", "a.md"]);
+        assert_eq!(parsed.tab, None);
+    }
+
+    #[test]
+    fn parse_args_reads_the_tab_name_in_every_form() {
+        for argv in [
+            ["mvm", "-t", "spec", "a.md"],
+            ["mvm", "--tab", "spec", "a.md"],
+            ["mvm", "--tab=spec", "a.md", ""],
+        ] {
+            let argv: Vec<&str> = argv.into_iter().filter(|arg| !arg.is_empty()).collect();
+            let parsed = parse_args(&args(&argv));
+            assert_eq!(parsed.tab.as_deref(), Some("spec"), "{argv:?}");
+            assert_eq!(parsed.targets, vec!["a.md"], "{argv:?}");
+        }
+        // 値のない --tab と空の名前は、指定なしとして扱う
+        assert_eq!(parse_args(&args(&["mvm", "a.md", "--tab"])).tab, None);
+        assert_eq!(parse_args(&args(&["mvm", "--tab=", "a.md"])).tab, None);
     }
 
     #[test]
@@ -259,6 +287,7 @@ mod tests {
             base: root.clone(),
             recursive: true,
             glob: None,
+            tab: String::new(),
         };
         assert_eq!(scan_pattern(&pattern).len(), 3);
     }

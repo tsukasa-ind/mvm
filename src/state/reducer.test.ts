@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { type FileId, type OpenedFile, type TabId } from "../domain/types";
 import { initialState, reducer } from "./reducer";
 
+const MAIN = "main" as TabId;
+const SPEC = "spec" as TabId;
 const file = (name: string): OpenedFile => ({ id: name as FileId, path: `/d/${name}`, name });
 
 describe("reducer", () => {
@@ -64,13 +66,71 @@ describe("reducer", () => {
   it("閉じると隣のファイルが選択され、どのタブにも属さない実体は破棄される", () => {
     let state = reducer(initialState, { type: "filesOpened", files: [file("a"), file("b"), file("c")] });
     state = reducer(state, { type: "fileSelected", id: "b" as FileId });
-    state = reducer(state, { type: "fileClosed", id: "b" as FileId });
+    state = reducer(state, { type: "fileClosed", id: "b" as FileId, tabId: MAIN });
     expect(state.tabs[0]?.fileIds).toEqual(["a", "c"]);
     expect(state.tabs[0]?.activeFileId).toBe("c");
     expect("b" in state.files).toBe(false);
-    state = reducer(state, { type: "fileClosed", id: "c" as FileId });
-    state = reducer(state, { type: "fileClosed", id: "a" as FileId });
+    state = reducer(state, { type: "fileClosed", id: "c" as FileId, tabId: MAIN });
+    state = reducer(state, { type: "fileClosed", id: "a" as FileId, tabId: MAIN });
     expect(state.tabs[0]?.activeFileId).toBeNull();
     expect(state.files).toEqual({});
+  });
+
+  describe("タブ", () => {
+    it("未知のタブへ開くとタブを作り、選択を切り替える", () => {
+      const state = reducer(initialState, { type: "filesOpened", files: [file("a")], tabId: SPEC });
+      expect(state.tabs.map((tab) => tab.id)).toEqual(["main", "spec"]);
+      expect(state.tabs[1]).toMatchObject({ title: "spec", fileIds: ["a"], activeFileId: "a" });
+      expect(state.activeTabId).toBe("spec");
+    });
+
+    it("select: false ではアクティブなタブを変えず、別のタブへ追加する", () => {
+      let state = reducer(initialState, { type: "tabCreated", id: SPEC });
+      state = reducer(state, { type: "tabSelected", id: MAIN });
+      state = reducer(state, { type: "filesOpened", files: [file("a")], tabId: SPEC, select: false });
+      expect(state.activeTabId).toBe("main");
+      expect(state.tabs[1]?.fileIds).toEqual(["a"]);
+      expect(state.tabs[1]?.activeFileId).toBeNull();
+    });
+
+    it("同じファイルを複数のタブで開いても実体は1つで、内容を共有する", () => {
+      let state = reducer(initialState, { type: "filesOpened", files: [file("a")] });
+      state = reducer(state, { type: "fileLoaded", id: "a" as FileId, content: "# a" });
+      state = reducer(state, { type: "filesOpened", files: [file("a")], tabId: SPEC, select: false });
+      expect(Object.keys(state.files)).toEqual(["a"]);
+      expect(state.files["a" as FileId]).toMatchObject({ status: "loaded", content: "# a" });
+    });
+
+    it("ファイルを閉じても他のタブが持つ間は実体を残す", () => {
+      let state = reducer(initialState, { type: "filesOpened", files: [file("a")] });
+      state = reducer(state, { type: "filesOpened", files: [file("a")], tabId: SPEC, select: false });
+      state = reducer(state, { type: "fileClosed", id: "a" as FileId, tabId: MAIN });
+      expect(state.tabs[0]?.fileIds).toEqual([]);
+      expect(state.tabs[1]?.fileIds).toEqual(["a"]);
+      expect("a" in state.files).toBe(true);
+      state = reducer(state, { type: "fileClosed", id: "a" as FileId, tabId: SPEC });
+      expect(state.files).toEqual({});
+    });
+
+    it("タブを閉じると、他のタブが持たないファイルだけ破棄し、隣のタブを選択する", () => {
+      let state = reducer(initialState, { type: "filesOpened", files: [file("a"), file("shared")] });
+      state = reducer(state, { type: "filesOpened", files: [file("b"), file("shared")], tabId: SPEC });
+      state = reducer(state, { type: "tabClosed", id: SPEC });
+      expect(state.tabs.map((tab) => tab.id)).toEqual(["main"]);
+      expect(state.activeTabId).toBe("main");
+      expect(Object.keys(state.files).sort()).toEqual(["a", "shared"]);
+    });
+
+    it("最後の1つのタブは閉じない", () => {
+      expect(reducer(initialState, { type: "tabClosed", id: MAIN })).toBe(initialState);
+    });
+
+    it("既にあるタブの作成は、そのタブを選択するだけ", () => {
+      let state = reducer(initialState, { type: "tabCreated", id: SPEC });
+      state = reducer(state, { type: "tabSelected", id: MAIN });
+      state = reducer(state, { type: "tabCreated", id: SPEC });
+      expect(state.tabs).toHaveLength(2);
+      expect(state.activeTabId).toBe("spec");
+    });
   });
 });

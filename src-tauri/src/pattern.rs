@@ -36,6 +36,13 @@ pub struct WatchPattern {
     pub recursive: bool,
     /// glob の場合の絶対パスパターン。None のときは `base` 配下の Markdown 全て
     pub glob: Option<String>,
+    /// 登録したタブ。展開時は空で、`Tabs::add_pattern` が設定する。旧セッションは `main`
+    #[serde(default = "default_tab")]
+    pub tab: String,
+}
+
+fn default_tab() -> String {
+    "main".to_string()
 }
 
 impl WatchPattern {
@@ -80,6 +87,7 @@ mod tests {
             base: PathBuf::from("/docs"),
             recursive,
             glob: None,
+            tab: String::new(),
         }
     }
 
@@ -118,6 +126,7 @@ mod tests {
             base: PathBuf::from("/docs"),
             recursive: false,
             glob: Some("/docs/*.md".into()),
+            tab: String::new(),
         };
         assert!(single.matches(Path::new("/docs/a.md")));
         assert!(!single.matches(Path::new("/docs/sub/a.md")));
@@ -125,6 +134,7 @@ mod tests {
             base: PathBuf::from("/docs"),
             recursive: true,
             glob: Some("/docs/**/*.md".into()),
+            tab: String::new(),
         };
         assert!(deep.matches(Path::new("/docs/sub/a.md")));
         assert!(!deep.matches(Path::new("/docs/sub/a.txt")));

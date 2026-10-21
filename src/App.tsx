@@ -4,10 +4,11 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { DocumentToolbar } from "./components/DocumentToolbar";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Sidebar } from "./components/Sidebar";
+import { TabBar } from "./components/TabBar";
 import { VIEWER_SCROLL_ID } from "./components/TocPanel";
 import { Viewer } from "./components/Viewer";
-import type { FileId, OpenedFile } from "./domain/types";
-import { closeFile, getStartup, onFileChanged, onOpenFiles, openPaths, readBytes, readMarkdown, saveSession } from "./lib/ipc";
+import type { FileId, OpenedFile, TabId } from "./domain/types";
+import { closeFile, closeTab, getStartup, onFileChanged, onOpenFiles, openPaths, readBytes, readMarkdown, saveSession } from "./lib/ipc";
 import { toSessionPayload } from "./lib/session";
 import { useScrollMemory } from "./lib/scrollMemory";
 import { useSettings } from "./lib/settings";
@@ -24,6 +25,9 @@ export const App = () => {
   const [raw, setRaw] = useState(false);
   const [restored, setRestored] = useState(false);
   const [dragging, setDragging] = useState(false);
+  // 非同期のコールバックから、最新のアクティブなタブとタブ一覧を参照する
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const scrollRef = useRef<HTMLElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   // ファイルごとにスクロール位置を覚える (フック呼び出しは早期 return より前に置く)
@@ -62,10 +66,10 @@ export const App = () => {
   }, []);
 
   const openFiles = useCallback(
-    (files: OpenedFile[]) => {
+    (files: OpenedFile[], tabId?: TabId) => {
       if (files.length === 0) return;
       track(files);
-      dispatch({ type: "filesOpened", files });
+      dispatch({ type: "filesOpened", files, tabId });
       for (const file of files) void load(file.id);
     },
     [load, track],
@@ -78,6 +82,7 @@ export const App = () => {
     const setup = async () => {
       const unlistenOpen = await onOpenFiles((event) => {
         track(event.files);
+        // --tab だけを指定した起動など、ファイルが空でもタブの作成と選択は反映する
         dispatch({ type: "filesOpened", files: event.files, tabId: event.tabId, select: event.select });
         for (const file of event.files) void load(file.id);
       });
@@ -94,7 +99,7 @@ export const App = () => {
           case "drop": {
             setDragging(false);
             // ディレクトリのドロップは配下の Markdown を再帰的に開く
-            openFiles(await openPaths("/", event.payload.paths, true));
+            openFiles(await openPaths("/", event.payload.paths, true, stateRef.current.activeTabId));
             break;
           }
         }
@@ -113,7 +118,8 @@ export const App = () => {
       track(startup.files);
       dispatch({ type: "sessionRestored", tabs: startup.tabs, activeTabId: startup.activeTabId, files: startup.files });
       for (const file of startup.files) void load(file.id);
-      openFiles(startup.cliFiles);
+      if (startup.cliFiles.length > 0) openFiles(startup.cliFiles, startup.cliTab);
+      else if (startup.cliTab !== startup.activeTabId) dispatch({ type: "tabCreated", id: startup.cliTab });
       setRestored(true);
     };
     void setup();
@@ -139,7 +145,7 @@ export const App = () => {
   }, [state, restored]);
 
   const openRelative = useCallback(
-    async (baseDir: string, path: string) => openFiles(await openPaths(baseDir, [path], false)),
+    async (baseDir: string, path: string) => openFiles(await openPaths(baseDir, [path], false, stateRef.current.activeTabId)),
     [openFiles],
   );
 
@@ -152,7 +158,7 @@ export const App = () => {
       });
       if (selected === null) return;
       const paths = Array.isArray(selected) ? selected : [selected];
-      openFiles(await openPaths("/", paths, true));
+      openFiles(await openPaths("/", paths, true, stateRef.current.activeTabId));
     },
     [openFiles],
   );
@@ -162,9 +168,27 @@ export const App = () => {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === "b") {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      if (!event.shiftKey && event.key.toLowerCase() === "b") {
         event.preventDefault();
         toggleSidebar();
+        return;
+      }
+      const { tabs, activeTabId } = stateRef.current;
+      // Ctrl+Tab / Ctrl+PageDown で次のタブ、Ctrl+Shift+Tab / Ctrl+PageUp で前のタブ
+      const step = event.key === "PageDown" || (event.key === "Tab" && !event.shiftKey) ? 1 : event.key === "PageUp" || (event.key === "Tab" && event.shiftKey) ? -1 : 0;
+      if (step !== 0 && tabs.length > 1) {
+        event.preventDefault();
+        const index = tabs.findIndex((candidate) => candidate.id === activeTabId);
+        const next = tabs[(index + step + tabs.length) % tabs.length];
+        if (next !== undefined) dispatch({ type: "tabSelected", id: next.id });
+        return;
+      }
+      // Ctrl+1..9 で N 番目のタブ
+      const nth = /^[1-9]$/.test(event.key) ? tabs[Number(event.key) - 1] : undefined;
+      if (nth !== undefined) {
+        event.preventDefault();
+        dispatch({ type: "tabSelected", id: nth.id });
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -172,9 +196,34 @@ export const App = () => {
   }, [toggleSidebar]);
 
   const close = useCallback(async (id: FileId) => {
-    dispatch({ type: "fileClosed", id });
-    await closeFile(id);
+    const tabId = stateRef.current.activeTabId;
+    dispatch({ type: "fileClosed", id, tabId });
+    await closeFile(tabId, id);
   }, []);
+
+  const addTab = useCallback(() => {
+    const used = new Set(stateRef.current.tabs.map((candidate) => candidate.id));
+    let n = used.size + 1;
+    while (used.has(`タブ ${n}` as TabId)) n += 1;
+    dispatch({ type: "tabCreated", id: `タブ ${n}` as TabId });
+  }, []);
+
+  const removeTab = useCallback(async (id: TabId) => {
+    // 最後の1つは閉じない (reducer も同じ判定)
+    if (stateRef.current.tabs.length <= 1) return;
+    dispatch({ type: "tabClosed", id });
+    await closeTab(id);
+  }, []);
+
+  // Rust が所属を管理するため、別のタブへの追加も open_paths を経由する
+  const addToTab = useCallback(
+    async (path: string, tabId: TabId) => {
+      const files = await openPaths("/", [path], false, tabId);
+      track(files);
+      dispatch({ type: "filesOpened", files, tabId, select: false });
+    },
+    [track],
+  );
 
   const tab = state.tabs.find((candidate) => candidate.id === state.activeTabId) ?? state.tabs[0];
   if (tab === undefined) return null;
@@ -184,6 +233,8 @@ export const App = () => {
     <div className="relative flex h-screen bg-white text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
       <Sidebar
         tab={tab}
+        otherTabs={state.tabs.filter((candidate) => candidate.id !== tab.id)}
+        onAddToTab={(path, tabId) => void addToTab(path, tabId)}
         files={state.files}
         onSelect={(id) => dispatch({ type: "fileSelected", id })}
         onClose={(id) => void close(id)}
@@ -193,6 +244,7 @@ export const App = () => {
         onRequestOpen={showSidebar}
       />
       <div className="flex min-w-0 flex-1 flex-col">
+        <TabBar tabs={state.tabs} activeTabId={state.activeTabId} onSelect={(id) => dispatch({ type: "tabSelected", id })} onClose={(id) => void removeTab(id)} />
         <header className="flex items-center justify-between border-b border-neutral-200 px-4 py-2 text-sm dark:border-neutral-800">
           <div className="mr-4 flex min-w-0 items-center gap-2">
             <button
@@ -217,6 +269,9 @@ export const App = () => {
               onToggleRaw={() => setRaw((current) => !current)}
               markdown={activeEntry?.status === "loaded" ? activeEntry.content : null}
             />
+            <button type="button" onClick={addTab} title="タブを追加" className="rounded px-2 py-1 hover:bg-neutral-200 dark:hover:bg-neutral-800">
+              ＋タブ
+            </button>
             <button type="button" onClick={cycle} className="rounded px-2 py-1 hover:bg-neutral-200 dark:hover:bg-neutral-800">
               テーマ: {THEME_LABEL[mode]}
             </button>

@@ -24,9 +24,19 @@ pub struct SessionFile {
     pub tabs: Vec<SessionTab>,
     pub active_tab_id: String,
     pub patterns: Vec<WatchPattern>,
-    /// ユーザーが閉じたファイル。監視パターンによる自動追加の対象から外す
-    #[serde(default)]
+    /// 旧形式の閉じたファイル (タブの区別なし)。読み込み専用で、`main` の履歴として扱う
+    #[serde(default, skip_serializing)]
     pub closed: Vec<PathBuf>,
+    /// タブで閉じたファイル。そのタブの監視パターンによる自動追加の対象から外す。
+    /// `closed` を書き換えないのは、旧バージョンが読んでセッションを失わないため
+    #[serde(default)]
+    pub closed_tabs: Vec<ClosedFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClosedFile {
+    pub tab: String,
+    pub path: PathBuf,
 }
 
 impl SessionFile {
@@ -34,15 +44,25 @@ impl SessionFile {
         tabs: Vec<SessionTab>,
         active_tab_id: String,
         patterns: Vec<WatchPattern>,
-        closed: Vec<PathBuf>,
+        closed_tabs: Vec<ClosedFile>,
     ) -> Self {
         Self {
             version: VERSION,
             tabs,
             active_tab_id,
             patterns,
-            closed,
+            closed: Vec::new(),
+            closed_tabs,
         }
+    }
+
+    /// 旧形式の履歴を `main` の履歴として加えた、タブごとの閉じたファイル。
+    pub fn closed_files(&self) -> Vec<ClosedFile> {
+        let legacy = self.closed.iter().map(|path| ClosedFile {
+            tab: "main".to_string(),
+            path: path.clone(),
+        });
+        legacy.chain(self.closed_tabs.iter().cloned()).collect()
     }
 }
 
@@ -80,8 +100,12 @@ mod tests {
                 base: PathBuf::from("/d"),
                 recursive: true,
                 glob: None,
+                tab: "main".into(),
             }],
-            vec![PathBuf::from("/d/closed.md")],
+            vec![ClosedFile {
+                tab: "main".into(),
+                path: PathBuf::from("/d/closed.md"),
+            }],
         )
     }
 
@@ -108,8 +132,36 @@ mod tests {
     }
 
     #[test]
+    fn legacy_session_without_tab_fields_loads_as_main() {
+        let legacy = r#"{
+            "version": 1,
+            "tabs": [{ "id": "main", "title": "main", "files": [], "activeFile": null }],
+            "activeTabId": "main",
+            "patterns": [{ "base": "/d", "recursive": true, "glob": null }],
+            "closed": ["/d/old.md"]
+        }"#;
+        let session: SessionFile = serde_json::from_str(legacy).unwrap();
+        assert_eq!(session.patterns[0].tab, "main");
+        assert_eq!(
+            session.closed_files(),
+            vec![ClosedFile {
+                tab: "main".into(),
+                path: PathBuf::from("/d/old.md")
+            }]
+        );
+        // 書き込みでは旧形式のフィールドを出力しない
+        assert!(!serde_json::to_string(&session)
+            .unwrap()
+            .contains("\"closed\""));
+    }
+
+    #[test]
     fn uses_camel_case_keys_for_the_frontend() {
         let text = serde_json::to_string(&sample()).unwrap();
-        assert!(text.contains("activeTabId") && text.contains("activeFile"));
+        assert!(
+            text.contains("activeTabId")
+                && text.contains("activeFile")
+                && text.contains("closedTabs")
+        );
     }
 }
