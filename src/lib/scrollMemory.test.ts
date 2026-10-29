@@ -58,6 +58,7 @@ const fakeScroller = (clientHeight: number) => {
   let scrollTop = 0;
   return {
     clientHeight,
+    style: { overflowAnchor: "" },
     get scrollHeight() {
       return scrollHeight;
     },
@@ -80,6 +81,11 @@ const fakeScroller = (clientHeight: number) => {
     },
     dispatch(name: string) {
       for (const listener of listeners.get(name) ?? []) listener();
+    },
+    /** 目標より上の内容が伸びた。WebView のスクロールアンカリングを真似て、伸びた分だけ scrollTop もずらす */
+    growAbove(delta: number) {
+      scrollHeight += delta;
+      scrollTop += delta;
     },
     listenerCount: () => [...listeners.values()].reduce((sum, set) => sum + set.size, 0),
   };
@@ -126,11 +132,37 @@ describe("restoreScroll", () => {
     scroller.scrollHeight = 3000;
     resize.resize(article);
     expect(scroller.scrollTop).toBe(800);
+    // 到達しても、上の図が後から描画される可能性があるので時間切れまで続ける
+    expect(handle.isRestoring()).toBe(true);
+    vi.advanceTimersByTime(2000);
     expect(handle.isRestoring()).toBe(false);
-    // 到達したら監視とイベントを解除する
+    // 終わったら監視とイベントを解除する
     expect(resize.observed.size).toBe(0);
     expect(mutation.connected).toBe(false);
     expect(scroller.listenerCount()).toBe(0);
+  });
+
+  it("到達後に上の図が描画され、アンカリングで位置がずれたら目標に戻す", () => {
+    const { scroller, content, handle, resize, mutation } = setup(800);
+    const article = {};
+    content.children = [article];
+    scroller.scrollHeight = 3000; // 図は「描画中…」のまま、内容は目標に届く長さ
+    mutation.callback();
+    expect(scroller.scrollTop).toBe(800);
+
+    // Mermaid の図が描画されて 400px 伸び、アンカリングで scrollTop が 1200 にずれる
+    scroller.growAbove(400);
+    expect(scroller.scrollTop).toBe(1200);
+    resize.resize(article);
+    expect(scroller.scrollTop).toBe(800);
+    expect(handle.isRestoring()).toBe(true);
+  });
+
+  it("復元中は overflow-anchor を無効にし、終わったら元に戻す", () => {
+    const { scroller, handle } = setup(800);
+    expect(scroller.style.overflowAnchor).toBe("none");
+    handle.dispose();
+    expect(scroller.style.overflowAnchor).toBe("");
   });
 
   it("入れ替わって外れた子要素は観測しない", () => {

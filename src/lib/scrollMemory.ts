@@ -21,7 +21,10 @@ export type RestoreHandle = {
 
 /**
  * scroller のスクロール位置を target に合わせる。内容は非同期に描画され、画像や Mermaid の図で高さが後から変わるため、
- * 目標に届くまで内容のサイズ変化のたびに再適用する。ユーザーの操作、到達、時間切れのいずれかで終わる。
+ * 内容のサイズ変化のたびに再適用する。ユーザーの操作か時間切れで終わる (目標 0 は即座に終わる)。
+ *
+ * 目標に届いた時点では終わらない。目標より上にある Mermaid の図が後から描画されると、WebView のスクロールアンカリングが
+ * scrollTop を図の高さ分ずらすため、時間切れまでは目標に戻し続ける。復元中は overflow-anchor も無効にする。
  *
  * content (App の `h-full` の div) はスクロール領域と同じ高さに固定され、内容が伸びても自身のサイズは変わらない。
  * そのため content の子要素 (Viewer が描画する実際の内容) を観測し、子の入れ替えは MutationObserver で追従する。
@@ -32,9 +35,11 @@ export const restoreScroll = (scroller: HTMLElement, content: HTMLElement, targe
   let resizeObserver: ResizeObserver | undefined;
   let mutationObserver: MutationObserver | undefined;
 
+  const previousAnchor = scroller.style.overflowAnchor;
   const finish = () => {
     if (!restoring) return;
     restoring = false;
+    scroller.style.overflowAnchor = previousAnchor;
     resizeObserver?.disconnect();
     mutationObserver?.disconnect();
     if (timer !== undefined) clearTimeout(timer);
@@ -45,7 +50,8 @@ export const restoreScroll = (scroller: HTMLElement, content: HTMLElement, targe
   const apply = () => {
     if (!restoring) return;
     if (!done()) scroller.scrollTop = target;
-    if (done()) finish();
+    // 先頭が目標なら、上に伸びる内容はないのでここで終える
+    if (target === 0 && done()) finish();
   };
 
   // 観測対象を content と現在の子要素に合わせる。外れた子は disconnect でまとめて解除する
@@ -56,6 +62,7 @@ export const restoreScroll = (scroller: HTMLElement, content: HTMLElement, targe
     for (const child of Array.from(content.children)) resizeObserver.observe(child);
   };
 
+  scroller.style.overflowAnchor = "none";
   for (const name of USER_EVENTS) scroller.addEventListener(name, finish, { passive: true });
   resizeObserver = new ResizeObserver(apply);
   mutationObserver = new MutationObserver(() => {
