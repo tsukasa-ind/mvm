@@ -1,4 +1,5 @@
 mod files;
+mod launch;
 mod pattern;
 mod scan;
 mod session;
@@ -6,6 +7,7 @@ mod tabs;
 mod watcher;
 
 use files::{file_id, resolve_image, OpenedFile, Registry};
+use launch::LaunchQueue;
 use pattern::{is_viewable, WatchPattern};
 use scan::{expand, parse_args, scan_pattern, CliOptions};
 use serde::Serialize;
@@ -17,6 +19,13 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use watcher::DirWatcher;
 
 const DEFAULT_TAB_ID: &str = "main";
+
+/// 2つ目以降の起動の (argv, cwd)
+type Launch = (Vec<String>, PathBuf);
+
+/// フロントが起動時の状態を受け取るまでの2つ目以降の起動。
+/// single-instance のコールバックは `AppState` の登録前にも呼ばれうるため、state ではなく static に置く
+static LAUNCHES: LaunchQueue<Launch> = LaunchQueue::new();
 
 struct AppState {
     registry: Registry,
@@ -30,7 +39,7 @@ struct AppState {
     startup: Mutex<Option<Startup>>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct OpenFilesPayload {
     files: Vec<OpenedFile>,
@@ -45,7 +54,7 @@ struct FileChangedPayload {
     id: String,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct RestoredTab {
     id: String,
@@ -54,7 +63,7 @@ struct RestoredTab {
     active_file_id: Option<String>,
 }
 
-#[derive(Serialize, Clone, Default)]
+#[derive(Serialize, Clone, Default, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct Startup {
     tabs: Vec<RestoredTab>,
@@ -74,39 +83,93 @@ enum ReadError {
     Failed { message: String },
 }
 
-/// ファイルを登録し、親ディレクトリを監視する。画像の asset protocol の許可は `resolve_markdown_image` が画像ごとに行う。
-/// 明示的に開かれたものとして扱うため、`tab` の閉じた履歴からは外す。
-fn register_file(app: &AppHandle, path: &Path, tab: &str) -> OpenedFile {
-    let state = app.state::<AppState>();
-    state.tabs.lock().unwrap().add_member(tab, path);
-    if state.registry.contains_path(path) {
-        return state.registry.insert(path); // 監視は登録済み。参照カウントを増やさない
-    }
-    let file = state.registry.insert(path);
-    if let Err(err) = state.watcher.watch_file(path) {
-        eprintln!("watch failed: {}: {err}", path.display());
-    }
-    file
+/// ファイルをタブに加える経緯。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Origin {
+    /// 起動引数・ダイアログなど明示的に開いた。タブの閉じた履歴から外す
+    Explicit,
+    /// 監視パターンによる自動追加。タブが閉じられた・ファイルが閉じられた後なら加えない
+    Pattern,
 }
 
-fn register_all(app: &AppHandle, paths: Vec<PathBuf>, tab: &str) -> Vec<OpenedFile> {
-    paths
-        .iter()
-        .map(|path| register_file(app, path, tab))
-        .collect()
-}
-
-/// パターンを `tab` のものとして登録し、新しく登録したものだけ監視を始める。
-fn add_patterns(app: &AppHandle, patterns: Vec<WatchPattern>, tab: &str) {
-    let state = app.state::<AppState>();
-    for pattern in patterns {
-        let (base, recursive) = (pattern.base.clone(), pattern.recursive);
-        let added = state.tabs.lock().unwrap().add_pattern(tab, pattern);
-        if !added {
-            continue;
+impl AppState {
+    /// ファイルをタブに加えて登録し、親ディレクトリを監視する。画像の asset protocol の許可は `resolve_markdown_image` が画像ごとに行う。
+    /// タブの所属の変更・登録・監視を `tabs` のロック内で行い、同時の登録や `close_file` / `close_tab` と直列化する。
+    /// `Origin::Pattern` で、加える対象でなくなっていれば None。
+    fn register(&self, path: &Path, tab: &str, origin: Origin) -> Option<OpenedFile> {
+        let mut tabs = self.tabs.lock().unwrap();
+        match origin {
+            Origin::Explicit => tabs.add_member(tab, path),
+            Origin::Pattern => {
+                if !tabs.add_pending(tab, path) {
+                    return None;
+                }
+            }
         }
-        if let Err(err) = state.watcher.watch_dir(&base, recursive) {
-            eprintln!("watch failed: {}: {err}", base.display());
+        Some(
+            self.registry
+                .insert_with(path, || match self.watcher.watch_file(path) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        eprintln!("watch failed: {}: {err}", path.display());
+                        false
+                    }
+                }),
+        )
+    }
+
+    fn register_all(&self, paths: Vec<PathBuf>, tab: &str) -> Vec<OpenedFile> {
+        paths
+            .iter()
+            .filter_map(|path| self.register(path, tab, Origin::Explicit))
+            .collect()
+    }
+
+    /// パターンを `tab` のものとして登録する。新しいパターンだけ監視を始め、監視に失敗したものは登録しない
+    /// (タブを閉じたときの `unwatch_dir` と対にするため)。
+    fn add_patterns(&self, patterns: Vec<WatchPattern>, tab: &str) {
+        let mut tabs = self.tabs.lock().unwrap();
+        for pattern in patterns {
+            let result = tabs.add_pattern_with(tab, pattern, |pattern| {
+                self.watcher
+                    .watch_dir(&pattern.base, pattern.recursive)
+                    .map_err(|err| format!("{}: {err}", pattern.base.display()))
+            });
+            if let Err(err) = result {
+                eprintln!("watch failed: {err}");
+            }
+        }
+    }
+
+    /// 登録と監視を解除する。監視に失敗していたファイルは、他の用途の参照数を減らさないよう unwatch しない。
+    fn release(&self, id: &str) {
+        if let Some(removed) = self.registry.remove(id) {
+            if removed.watched {
+                self.watcher.unwatch_file(&removed.path);
+            }
+        }
+    }
+
+    /// `tab_id` からファイルを外す。どのタブも持たなくなったときだけ、登録と監視を解除する。
+    fn close_file(&self, tab_id: &str, id: &str) {
+        let Some(path) = self.registry.get(id) else {
+            return;
+        };
+        let mut tabs = self.tabs.lock().unwrap();
+        if tabs.close_file(tab_id, &path) {
+            self.release(id);
+        }
+    }
+
+    /// タブを閉じる。タブの監視パターンと閉じた履歴を消し、どのタブも持たなくなったファイルを解除する。
+    fn close_tab(&self, tab_id: &str) {
+        let mut tabs = self.tabs.lock().unwrap();
+        let (patterns, released) = tabs.close_tab(tab_id);
+        for pattern in patterns {
+            self.watcher.unwatch_dir(&pattern.base);
+        }
+        for path in released {
+            self.release(&file_id(&path));
         }
     }
 }
@@ -131,7 +194,14 @@ fn on_fs_event(app: &AppHandle, paths: Vec<PathBuf>) {
         }
     }
     for (tab, group) in by_tab {
-        let files = register_all(app, group, &tab);
+        // 判定の後にタブやファイルが閉じられたものは加えない (タブを復活させない)
+        let files: Vec<OpenedFile> = group
+            .iter()
+            .filter_map(|path| state.register(path, &tab, Origin::Pattern))
+            .collect();
+        if files.is_empty() {
+            continue;
+        }
         let _ = app.emit(
             "open-files",
             OpenFilesPayload {
@@ -144,8 +214,7 @@ fn on_fs_event(app: &AppHandle, paths: Vec<PathBuf>) {
 }
 
 /// 保存済みセッション、監視パターンの再走査、起動引数から起動時の状態を組み立てる。
-fn build_startup(app: &AppHandle, args: &[String], cwd: &Path) -> Startup {
-    let state = app.state::<AppState>();
+fn build_startup(state: &AppState, args: &[String], cwd: &Path) -> Startup {
     let mut files: Vec<OpenedFile> = Vec::new();
     let mut tabs: Vec<RestoredTab> = Vec::new();
     let mut active_tab_id = DEFAULT_TAB_ID.to_string();
@@ -159,13 +228,15 @@ fn build_startup(app: &AppHandle, args: &[String], cwd: &Path) -> Startup {
         );
         for pattern in saved.patterns {
             let tab = pattern.tab.clone();
-            add_patterns(app, vec![pattern], &tab);
+            state.add_patterns(vec![pattern], &tab);
         }
         active_tab_id = saved.active_tab_id;
         for tab in saved.tabs {
             let mut file_ids = Vec::new();
             for path in tab.files.iter().filter(|path| path.is_file()) {
-                let file = register_file(app, path, &tab.id);
+                let Some(file) = state.register(path, &tab.id, Origin::Explicit) else {
+                    continue;
+                };
                 file_ids.push(file.id.clone());
                 files.push(file);
             }
@@ -197,10 +268,9 @@ fn build_startup(app: &AppHandle, args: &[String], cwd: &Path) -> Startup {
     let patterns = state.tabs.lock().unwrap().patterns();
     for pattern in patterns {
         for path in scan_pattern(&pattern) {
-            if !state.tabs.lock().unwrap().should_add(&pattern.tab, &path) {
+            let Some(file) = state.register(&path, &pattern.tab, Origin::Pattern) else {
                 continue;
-            }
-            let file = register_file(app, &path, &pattern.tab);
+            };
             let index = match tabs.iter().position(|tab| tab.id == pattern.tab) {
                 Some(index) => index,
                 None => {
@@ -221,9 +291,9 @@ fn build_startup(app: &AppHandle, args: &[String], cwd: &Path) -> Startup {
     let parsed = parse_args(args);
     let cli_tab = parsed.tab.clone().unwrap_or_else(|| active_tab_id.clone());
     let expansion = expand(&parsed.targets, cwd, parsed.options);
-    let cli_files = register_all(app, expansion.files, &cli_tab);
+    let cli_files = state.register_all(expansion.files, &cli_tab);
     if parsed.options.watch {
-        add_patterns(app, expansion.patterns, &cli_tab);
+        state.add_patterns(expansion.patterns, &cli_tab);
     }
 
     Startup {
@@ -235,9 +305,88 @@ fn build_startup(app: &AppHandle, args: &[String], cwd: &Path) -> Startup {
     }
 }
 
+/// 2つ目以降の起動を処理する。表示するもの (ファイルか、指定されたタブ) がなければ None。
+fn process_launch(state: &AppState, argv: &[String], cwd: &Path) -> Option<OpenFilesPayload> {
+    let parsed = parse_args(argv);
+    let tab = parsed
+        .tab
+        .clone()
+        .unwrap_or_else(|| state.active_tab.lock().unwrap().clone());
+    let expansion = expand(&parsed.targets, cwd, parsed.options);
+    let files = state.register_all(expansion.files, &tab);
+    if parsed.options.watch {
+        state.add_patterns(expansion.patterns, &tab);
+    }
+    // タブを指定した起動は、ファイルがなくてもそのタブを作って選択する
+    (!files.is_empty() || parsed.tab.is_some()).then_some(OpenFilesPayload {
+        files,
+        tab_id: tab,
+        select: true,
+    })
+}
+
+/// フロントが起動時の状態を受け取る前に届いた起動を、起動時の状態に合流させる。
+/// 起動引数でファイルもタブも指定していなければ、最初の起動を起動引数として扱う (フロントが選択する)。
+/// 起動引数の追加先と同じタブへの起動はそのファイルに加え、別のタブへの起動は復元するタブに加える。
+fn merge_launch(startup: &mut Startup, launch: OpenFilesPayload) {
+    let cli_requested = !startup.cli_files.is_empty() || startup.cli_tab != startup.active_tab_id;
+    if !cli_requested {
+        startup.cli_tab = launch.tab_id.clone();
+    }
+    if launch.tab_id == startup.cli_tab {
+        for file in launch.files {
+            if !startup.cli_files.iter().any(|known| known.id == file.id) {
+                startup.cli_files.push(file);
+            }
+        }
+        return;
+    }
+    let index = match startup.tabs.iter().position(|tab| tab.id == launch.tab_id) {
+        Some(index) => index,
+        None => {
+            startup.tabs.push(RestoredTab {
+                id: launch.tab_id.clone(),
+                title: launch.tab_id.clone(),
+                file_ids: Vec::new(),
+                active_file_id: None,
+            });
+            startup.tabs.len() - 1
+        }
+    };
+    let tab = &mut startup.tabs[index];
+    if let Some(first) = launch.files.first() {
+        tab.active_file_id = Some(first.id.clone());
+    }
+    for file in launch.files {
+        if !tab.file_ids.contains(&file.id) {
+            tab.file_ids.push(file.id.clone());
+        }
+        if !startup.files.iter().any(|known| known.id == file.id) {
+            startup.files.push(file);
+        }
+    }
+}
+
+/// 起動時の状態を返し、保留していた起動を合流させる。以後の起動は `open-files` で通知する。
+/// setup は commands より先に main スレッドで完了するため、`startup` が None になるのは異常時のみ。
+fn take_startup(state: &AppState, launches: &LaunchQueue<Launch>) -> Startup {
+    let mut startup = state.startup.lock().unwrap();
+    let Some(startup) = startup.as_mut() else {
+        return Startup::default();
+    };
+    launches.drain_into(|pending| {
+        for (argv, cwd) in pending {
+            if let Some(launch) = process_launch(state, &argv, &cwd) {
+                merge_launch(startup, launch);
+            }
+        }
+    });
+    startup.clone()
+}
+
 #[tauri::command]
 fn get_startup(state: State<'_, AppState>) -> Startup {
-    state.startup.lock().unwrap().clone().unwrap_or_default()
+    take_startup(&state, &LAUNCHES)
 }
 
 /// ドラッグ&ドロップ、ダイアログ、相対リンクで開くパスを登録する。
@@ -281,7 +430,7 @@ fn open_paths(
             }
         }
     }
-    register_all(&app, resolved, &tab_id)
+    app.state::<AppState>().register_all(resolved, &tab_id)
 }
 
 #[tauri::command]
@@ -325,27 +474,13 @@ fn read_bytes(state: State<'_, AppState>, id: String) -> Result<tauri::ipc::Resp
 /// `tab_id` からファイルを外す。どのタブも持たなくなったときだけ、登録と監視を解除する。
 #[tauri::command]
 fn close_file(state: State<'_, AppState>, tab_id: String, id: String) {
-    let Some(path) = state.registry.get(&id) else {
-        return;
-    };
-    let released = state.tabs.lock().unwrap().close_file(&tab_id, &path);
-    if released {
-        state.registry.remove(&id);
-        state.watcher.unwatch_file(&path);
-    }
+    state.close_file(&tab_id, &id);
 }
 
 /// タブを閉じる。タブの監視パターンと閉じた履歴を消し、どのタブも持たなくなったファイルを解除する。
 #[tauri::command]
 fn close_tab(state: State<'_, AppState>, tab_id: String) {
-    let (patterns, released) = state.tabs.lock().unwrap().close_tab(&tab_id);
-    for pattern in patterns {
-        state.watcher.unwatch_dir(&pattern.base);
-    }
-    for path in released {
-        state.registry.remove(&file_id(&path));
-        state.watcher.unwatch_file(&path);
-    }
+    state.close_tab(&tab_id);
 }
 
 #[tauri::command]
@@ -383,26 +518,14 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
-            let parsed = parse_args(&argv);
-            let tab = parsed
-                .tab
-                .clone()
-                .unwrap_or_else(|| app.state::<AppState>().active_tab.lock().unwrap().clone());
-            let expansion = expand(&parsed.targets, Path::new(&cwd), parsed.options);
-            let files = register_all(app, expansion.files, &tab);
-            if parsed.options.watch {
-                add_patterns(app, expansion.patterns, &tab);
-            }
-            // タブを指定した起動は、ファイルがなくてもそのタブを作って選択する
-            if !files.is_empty() || parsed.tab.is_some() {
-                let _ = app.emit(
-                    "open-files",
-                    OpenFilesPayload {
-                        files,
-                        tab_id: tab,
-                        select: true,
-                    },
-                );
+            // AppState の登録前・フロントの準備前に届いた起動は積んでおき、get_startup で合流させる
+            if let Some((argv, cwd)) = LAUNCHES.push_or_pass((argv, PathBuf::from(cwd))) {
+                // 準備完了は AppState の登録後なので、ここで None になることはない
+                if let Some(state) = app.try_state::<AppState>() {
+                    if let Some(payload) = process_launch(&state, &argv, &cwd) {
+                        let _ = app.emit("open-files", payload);
+                    }
+                }
             }
             focus_main_window(app);
         }));
@@ -438,8 +561,9 @@ pub fn run() {
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect();
             let cwd = std::env::current_dir()?;
-            let startup = build_startup(app.handle(), &args, &cwd);
-            *app.state::<AppState>().startup.lock().unwrap() = Some(startup);
+            let state = app.state::<AppState>();
+            let startup = build_startup(&state, &args, &cwd);
+            *state.startup.lock().unwrap() = Some(startup);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -454,4 +578,188 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running mvm");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn app_state(dir: &Path) -> AppState {
+        AppState {
+            registry: Registry::default(),
+            watcher: DirWatcher::new(|_| {}).unwrap(),
+            tabs: Mutex::new(Tabs::default()),
+            active_tab: Mutex::new(DEFAULT_TAB_ID.to_string()),
+            session_path: dir.join("session.json"),
+            startup: Mutex::new(None),
+        }
+    }
+
+    /// 正規化済みの一時ディレクトリと、その中の Markdown ファイル
+    fn fixture(names: &[&str]) -> (tempfile::TempDir, PathBuf, Vec<PathBuf>) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let files = names
+            .iter()
+            .map(|name| {
+                let path = root.join(name);
+                fs::write(&path, "# x").unwrap();
+                path
+            })
+            .collect();
+        (dir, root, files)
+    }
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| item.to_string()).collect()
+    }
+
+    fn opened(name: &str) -> OpenedFile {
+        files::opened_file(Path::new(&format!("/d/{name}")))
+    }
+
+    #[test]
+    fn registering_the_same_file_twice_watches_once() {
+        let (_dir, root, files) = fixture(&["a.md"]);
+        let state = app_state(&root);
+        let first = state.register(&files[0], "a", Origin::Explicit).unwrap();
+        let second = state.register(&files[0], "b", Origin::Explicit).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(state.watcher.entry(&root), Some((1, false)));
+        state.close_file("a", &first.id);
+        assert_eq!(state.watcher.entry(&root), Some((1, false)));
+        state.close_file("b", &first.id);
+        assert_eq!(state.watcher.entry(&root), None);
+        assert_eq!(state.registry.get(&first.id), None);
+    }
+
+    #[test]
+    fn pattern_addition_after_closing_the_tab_is_dropped() {
+        let (_dir, root, files) = fixture(&["new.md"]);
+        let state = app_state(&root);
+        state.add_patterns(
+            vec![WatchPattern {
+                base: root.clone(),
+                recursive: false,
+                glob: None,
+                tab: String::new(),
+            }],
+            "spec",
+        );
+        assert_eq!(state.watcher.entry(&root), Some((1, false)));
+        let pending = state.tabs.lock().unwrap().pending_additions(&files);
+        assert_eq!(pending.len(), 1);
+        // 判定の後、登録の前にタブが閉じられた
+        state.close_tab("spec");
+        assert_eq!(state.register(&files[0], "spec", Origin::Pattern), None);
+        assert!(!state.registry.contains_path(&files[0]));
+        assert_eq!(state.watcher.entry(&root), None);
+    }
+
+    #[test]
+    fn pattern_that_cannot_be_watched_is_not_registered() {
+        let (_dir, root, files) = fixture(&["a.md"]);
+        let state = app_state(&root);
+        state.register(&files[0], "main", Origin::Explicit);
+        state.add_patterns(
+            vec![WatchPattern {
+                base: root.join("missing"),
+                recursive: true,
+                glob: None,
+                tab: String::new(),
+            }],
+            "main",
+        );
+        assert!(state.tabs.lock().unwrap().patterns().is_empty());
+        // タブを閉じても、ファイルの監視の参照数以上には解除しない
+        state.close_tab("main");
+        assert_eq!(state.watcher.entry(&root), None);
+    }
+
+    #[test]
+    fn launch_opens_files_or_selects_the_named_tab() {
+        let (_dir, root, files) = fixture(&["a.md"]);
+        let state = app_state(&root);
+        let launch = process_launch(&state, &args(&["mvm", "a.md"]), &root).unwrap();
+        assert_eq!(launch.tab_id, DEFAULT_TAB_ID);
+        assert_eq!(launch.files, vec![files::opened_file(&files[0])]);
+        let launch = process_launch(&state, &args(&["mvm", "-t", "spec"]), &root).unwrap();
+        assert_eq!((launch.tab_id.as_str(), launch.files.len()), ("spec", 0));
+        assert_eq!(process_launch(&state, &args(&["mvm"]), &root), None);
+    }
+
+    #[test]
+    fn launches_before_get_startup_are_merged_into_startup() {
+        let (_dir, root, files) = fixture(&["a.md", "b.md"]);
+        let state = app_state(&root);
+        let queue = LaunchQueue::new();
+        // setup の完了前 (AppState の登録前を含む) に届いた起動
+        assert!(queue
+            .push_or_pass((args(&["mvm", "a.md"]), root.clone()))
+            .is_none());
+        assert!(queue
+            .push_or_pass((args(&["mvm", "-t", "spec", "b.md"]), root.clone()))
+            .is_none());
+        *state.startup.lock().unwrap() = Some(build_startup(&state, &args(&["mvm"]), &root));
+
+        let startup = take_startup(&state, &queue);
+        assert_eq!(startup.cli_tab, DEFAULT_TAB_ID);
+        assert_eq!(startup.cli_files, vec![files::opened_file(&files[0])]);
+        let spec = startup.tabs.iter().find(|tab| tab.id == "spec").unwrap();
+        assert_eq!(spec.file_ids, vec![file_id(&files[1])]);
+        assert!(startup.files.contains(&files::opened_file(&files[1])));
+        // StrictMode の2回目の取得でも同じ内容を返し、以後の起動は直接処理する
+        assert_eq!(take_startup(&state, &queue), startup);
+        assert!(queue
+            .push_or_pass((args(&["mvm", "a.md"]), root.clone()))
+            .is_some());
+    }
+
+    #[test]
+    fn first_merged_launch_becomes_the_cli_request() {
+        let mut startup = Startup {
+            active_tab_id: "main".into(),
+            cli_tab: "main".into(),
+            ..Startup::default()
+        };
+        merge_launch(
+            &mut startup,
+            OpenFilesPayload {
+                files: vec![opened("a.md")],
+                tab_id: "spec".into(),
+                select: true,
+            },
+        );
+        assert_eq!(startup.cli_tab, "spec");
+        assert_eq!(startup.cli_files, vec![opened("a.md")]);
+        // 同じタブへの後続の起動は重複なく加え、別のタブへの起動は復元するタブに加える
+        merge_launch(
+            &mut startup,
+            OpenFilesPayload {
+                files: vec![opened("a.md"), opened("b.md")],
+                tab_id: "spec".into(),
+                select: true,
+            },
+        );
+        merge_launch(
+            &mut startup,
+            OpenFilesPayload {
+                files: vec![opened("c.md")],
+                tab_id: "main".into(),
+                select: true,
+            },
+        );
+        assert_eq!(startup.cli_files, vec![opened("a.md"), opened("b.md")]);
+        assert_eq!(
+            startup.tabs,
+            vec![RestoredTab {
+                id: "main".into(),
+                title: "main".into(),
+                file_ids: vec![opened("c.md").id],
+                active_file_id: Some(opened("c.md").id),
+            }]
+        );
+        assert_eq!(startup.files, vec![opened("c.md")]);
+    }
 }

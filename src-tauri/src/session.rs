@@ -2,8 +2,8 @@
 
 use crate::pattern::WatchPattern;
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 const VERSION: u32 = 1;
@@ -66,21 +66,58 @@ impl SessionFile {
     }
 }
 
-/// ファイルが無い・壊れている・バージョン不一致のときは None (セッションなしで起動する)。
-pub fn load(path: &Path) -> Option<SessionFile> {
+/// 本体の直前の正常な内容。本体が壊れていたときの復元元
+pub fn backup_path(path: &Path) -> PathBuf {
+    path.with_extension("json.bak")
+}
+
+/// ファイルが無い・壊れている・バージョン不一致のときは None。
+fn read(path: &Path) -> Option<SessionFile> {
     let text = fs::read_to_string(path).ok()?;
     let session: SessionFile = serde_json::from_str(&text).ok()?;
     (session.version == VERSION).then_some(session)
 }
 
-/// 一時ファイルへ書いてから rename し、書き込み途中の破損を避ける。
+/// 本体が読めないときは `.bak` から復元する。どちらも読めなければ None (セッションなしで起動する)。
+pub fn load(path: &Path) -> Option<SessionFile> {
+    read(path).or_else(|| {
+        let restored = read(&backup_path(path))?;
+        eprintln!("session restored from backup: {}", path.display());
+        Some(restored)
+    })
+}
+
+/// 一時ファイルへ書いて fsync してから rename し、書き込み途中や電源断での破損を避ける。
+/// 正常に読める本体は rename の前に `.bak` へ退避する (壊れた本体で `.bak` を上書きしない)。
 pub fn save(path: &Path, session: &SessionFile) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
+    let parent = path.parent().filter(|dir| !dir.as_os_str().is_empty());
+    if let Some(parent) = parent {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_vec_pretty(session)?)?;
-    fs::rename(&tmp, path)
+    {
+        let mut file = File::create(&tmp)?;
+        file.write_all(&serde_json::to_vec_pretty(session)?)?;
+        file.sync_all()?;
+    }
+    if read(path).is_some() {
+        fs::rename(path, backup_path(path))?;
+    }
+    fs::rename(&tmp, path)?;
+    if let Some(parent) = parent {
+        sync_dir(parent);
+    }
+    Ok(())
+}
+
+/// rename をディレクトリエントリごと永続化する。Windows ではディレクトリを開けないため行わない (失敗は無視する)。
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(dir) = File::open(dir) {
+        let _ = dir.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 #[cfg(test)]
@@ -129,6 +166,49 @@ mod tests {
         old.version = 0;
         fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
         assert_eq!(load(&path), None);
+    }
+
+    #[test]
+    fn save_keeps_previous_session_as_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        let mut first = sample();
+        first.active_tab_id = "first".into();
+        save(&path, &first).unwrap();
+        assert!(!backup_path(&path).exists());
+        save(&path, &sample()).unwrap();
+        assert_eq!(read(&path), Some(sample()));
+        assert_eq!(read(&backup_path(&path)), Some(first));
+    }
+
+    #[test]
+    fn corrupt_or_missing_session_is_restored_from_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        save(&path, &sample()).unwrap();
+        save(&path, &sample()).unwrap();
+        // 電源断で本体が空になった場合
+        fs::write(&path, "").unwrap();
+        assert_eq!(load(&path), Some(sample()));
+        fs::write(&path, "{ not json").unwrap();
+        assert_eq!(load(&path), Some(sample()));
+        // 退避の rename の直後に止まった場合
+        fs::remove_file(&path).unwrap();
+        assert_eq!(load(&path), Some(sample()));
+    }
+
+    #[test]
+    fn corrupt_session_does_not_overwrite_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        let mut good = sample();
+        good.active_tab_id = "good".into();
+        save(&path, &good).unwrap();
+        save(&path, &good).unwrap();
+        fs::write(&path, "").unwrap();
+        save(&path, &sample()).unwrap();
+        assert_eq!(read(&path), Some(sample()));
+        assert_eq!(read(&backup_path(&path)), Some(good));
     }
 
     #[test]
