@@ -165,9 +165,9 @@ export const Sidebar = ({ tab, otherTabs, onAddToTab, files, onSelect, onClose, 
             style={{ paddingLeft: `${0.75 + depth * 0.75}rem` }}
             className="flex w-full items-center gap-1 truncate py-1 pr-2 text-left text-sm text-neutral-600 hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-800/60"
           >
-            <span aria-hidden className="w-3 shrink-0 text-xs">
-              {open ? "▾" : "▸"}
-            </span>
+            <svg aria-hidden viewBox="0 0 12 12" className={`size-3 shrink-0 ${open ? "rotate-90" : ""}`}>
+              <path d="M4.5 2.5 8 6l-3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
             <span className="truncate">{node.name}</span>
           </button>
           {open && <ul>{renderNodes(node.children, depth + 1)}</ul>}

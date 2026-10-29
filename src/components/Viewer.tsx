@@ -1,5 +1,5 @@
 import { Suspense, lazy, useMemo } from "react";
-import { assertNever, type FileEntry } from "../domain/types";
+import { assertNever, type FileEntry, type FileId } from "../domain/types";
 import { splitFrontmatter } from "../lib/frontmatter";
 import { MarkdownBody } from "../lib/markdown";
 import { dirname } from "../lib/path";
@@ -19,9 +19,9 @@ type Props = {
 
 const Message = ({ children }: { children: string }) => <p className="p-8 text-neutral-500">{children}</p>;
 
-type DocumentProps = { content: string; baseDir: string; settings: Settings; onOpenRelative: (path: string) => void };
+type DocumentProps = { content: string; fileId: FileId; settings: Settings; onOpenRelative: (path: string) => void };
 
-const LoadedDocument = ({ content, baseDir, settings, onOpenRelative }: DocumentProps) => {
+const LoadedDocument = ({ content, fileId, settings, onOpenRelative }: DocumentProps) => {
   // frontmatter は本文と別に折りたたみ表示し、Markdown の変換対象から外す
   const { frontmatter, body } = useMemo(() => splitFrontmatter(content), [content]);
   const rendered = useMarkdownTree(body);
@@ -41,7 +41,7 @@ const LoadedDocument = ({ content, baseDir, settings, onOpenRelative }: Document
               </details>
             )}
             <article id={ARTICLE_ID} className={`prose ${FONT_SIZES[settings.fontSize]} prose-neutral dark:prose-invert max-w-none`}>
-              <MarkdownBody tree={rendered.tree} baseDir={baseDir} onOpenRelative={onOpenRelative} />
+              <MarkdownBody tree={rendered.tree} fileId={fileId} onOpenRelative={onOpenRelative} />
             </article>
           </div>
           <TocPanel headings={rendered.headings} />
@@ -76,7 +76,7 @@ export const Viewer = ({ entry, settings, raw, onOpenRelative }: Props) => {
         );
       }
       const baseDir = dirname(entry.file.path);
-      return <LoadedDocument content={entry.content} baseDir={baseDir} settings={settings} onOpenRelative={(path) => onOpenRelative(baseDir, path)} />;
+      return <LoadedDocument content={entry.content} fileId={entry.file.id} settings={settings} onOpenRelative={(path) => onOpenRelative(baseDir, path)} />;
     }
     default:
       return assertNever(entry);

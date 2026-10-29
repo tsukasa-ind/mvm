@@ -1,20 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dirname, isRelativeReference, resolveRelative, splitFragment } from "./path";
-
-describe("resolveRelative", () => {
-  it("POSIX の相対パスを解決する", () => {
-    expect(resolveRelative("/home/u/docs", "img/a.png")).toBe("/home/u/docs/img/a.png");
-    expect(resolveRelative("/home/u/docs", "./img/a.png")).toBe("/home/u/docs/img/a.png");
-    expect(resolveRelative("/home/u/docs", "../assets/a.png")).toBe("/home/u/assets/a.png");
-  });
-  it("Windows のパスは区切りを維持する", () => {
-    expect(resolveRelative("C:\\Users\\u\\docs", "img/a.png")).toBe("C:\\Users\\u\\docs\\img\\a.png");
-    expect(resolveRelative("C:\\Users\\u\\docs", "..\\a.png")).toBe("C:\\Users\\u\\a.png");
-  });
-  it("ルートを越える .. はルートで止まる", () => {
-    expect(resolveRelative("/a", "../../b.png")).toBe("/b.png");
-  });
-});
+import { dirname, isRelativeReference, splitFragment } from "./path";
 
 describe("dirname", () => {
   it("両方の区切りに対応する", () => {
