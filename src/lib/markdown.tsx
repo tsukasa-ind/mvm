@@ -2,12 +2,14 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { Root as HastRoot } from "hast";
 import { type Components, toJsxRuntime } from "hast-util-to-jsx-runtime";
-import { type JSX, type MouseEvent, useState } from "react";
+import { type JSX, type MouseEvent, useEffect, useState } from "react";
 import { Fragment, jsx, jsxs } from "react/jsx-runtime";
 import { MermaidDiagram } from "../components/MermaidDiagram";
 import { ZoomModal } from "../components/ZoomModal";
+import type { FileId } from "../domain/types";
+import { resolveMarkdownImage } from "./ipc";
 import { MERMAID_TAG } from "./pipeline";
-import { isRelativeReference, resolveRelative, safeDecode, splitFragment } from "./path";
+import { isRelativeReference, safeDecode, splitFragment } from "./path";
 
 const EXTERNAL_PROTOCOLS = /^(https?|mailto):/i;
 
@@ -15,23 +17,47 @@ const scrollToFragment = (fragment: string) => {
   document.getElementById(safeDecode(fragment.slice(1)))?.scrollIntoView();
 };
 
+type ImageProps = { fileId: FileId; reference: string; alt: string; title?: string; onZoom: (src: string) => void };
+
+/** ローカル画像。参照先の解決と表示許可を Rust に依頼してから表示する */
+const LocalImage = ({ fileId, reference, alt, title, onZoom }: ImageProps) => {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const resolve = async () => {
+      const path = await resolveMarkdownImage(fileId, safeDecode(splitFragment(reference).path));
+      // 見つからない画像は元の参照のまま表示し、壊れた画像として alt を出す
+      if (!cancelled) setSrc(path === null ? reference : convertFileSrc(path));
+    };
+    void resolve();
+    return () => {
+      cancelled = true;
+    };
+  }, [fileId, reference]);
+  if (src === null) return null;
+  return <img src={src} alt={alt} title={title} onClick={() => onZoom(src)} />;
+};
+
 type Props = {
   tree: HastRoot;
-  /** Markdown のあるディレクトリの絶対パス。相対パスの解決基準 */
-  baseDir: string;
+  /** 表示中の Markdown ファイル。画像の相対パスの解決基準 */
+  fileId: FileId;
   /** Markdown 内の相対リンクで別ファイルを開く */
   onOpenRelative: (path: string) => void;
 };
 
 type Zoom = { kind: "image"; src: string; alt: string } | { kind: "svg"; html: string };
 
-export const MarkdownBody = ({ tree, baseDir, onOpenRelative }: Props) => {
+export const MarkdownBody = ({ tree, fileId, onOpenRelative }: Props) => {
   const [zoom, setZoom] = useState<Zoom | null>(null);
   const components: Components = {
     img: ({ src, alt, title }: JSX.IntrinsicElements["img"]) => {
       if (typeof src !== "string") return null;
-      const resolved = isRelativeReference(src) ? convertFileSrc(resolveRelative(baseDir, safeDecode(splitFragment(src).path))) : src;
-      return <img src={resolved} alt={alt ?? ""} title={title} onClick={() => setZoom({ kind: "image", src: resolved, alt: alt ?? "" })} />;
+      const onZoom = (resolved: string) => setZoom({ kind: "image", src: resolved, alt: alt ?? "" });
+      if (isRelativeReference(src)) {
+        return <LocalImage fileId={fileId} reference={src} alt={alt ?? ""} title={title} onZoom={onZoom} />;
+      }
+      return <img src={src} alt={alt ?? ""} title={title} onClick={() => onZoom(src)} />;
     },
     a: ({ href, children }: JSX.IntrinsicElements["a"]) => {
       const onClick = (event: MouseEvent<HTMLAnchorElement>) => {

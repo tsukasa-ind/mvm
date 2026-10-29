@@ -37,6 +37,23 @@ pub fn resolve_path(arg: &str, base: &Path) -> Option<PathBuf> {
     canonical.is_file().then_some(canonical)
 }
 
+const IMAGE_EXTENSIONS: [&str; 9] = [
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif",
+];
+
+/// Markdown 内の画像の相対参照を、Markdown のあるディレクトリ `base` 基準で解決する。
+/// 任意ファイルを表示対象にしないよう、画像の拡張子に限る。
+pub fn resolve_image(reference: &str, base: &Path) -> Option<PathBuf> {
+    let extension = Path::new(reference)
+        .extension()?
+        .to_string_lossy()
+        .to_lowercase();
+    if !IMAGE_EXTENSIONS.contains(&extension.as_str()) {
+        return None;
+    }
+    resolve_path(reference, base)
+}
+
 /// id と実パスの対応表。フロントは id だけを渡し、任意パスの読み取りはできない。
 #[derive(Default)]
 pub struct Registry {
@@ -115,6 +132,26 @@ mod tests {
         );
         assert_eq!(resolve_path("missing.md", &base), None);
         assert_eq!(resolve_path("sub", &base), None);
+    }
+
+    #[test]
+    fn resolve_image_resolves_relative_references_outside_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let manual = root.join("doc").join("manual");
+        fs::create_dir_all(&manual).unwrap();
+        fs::create_dir_all(root.join("doc").join("images")).unwrap();
+        fs::write(root.join("doc/images/a.png"), "x").unwrap();
+        fs::write(manual.join("b.png"), "x").unwrap();
+        fs::write(root.join("doc/images/a.md"), "x").unwrap();
+
+        assert_eq!(
+            resolve_image("../images/a.png", &manual),
+            Some(root.join("doc/images/a.png"))
+        );
+        assert_eq!(resolve_image("b.png", &manual), Some(manual.join("b.png")));
+        assert_eq!(resolve_image("../images/missing.png", &manual), None);
+        assert_eq!(resolve_image("../images/a.md", &manual), None);
     }
 
     #[test]

@@ -5,7 +5,7 @@ mod session;
 mod tabs;
 mod watcher;
 
-use files::{file_id, resolve_path, OpenedFile, Registry};
+use files::{file_id, resolve_image, resolve_path, OpenedFile, Registry};
 use pattern::WatchPattern;
 use scan::{expand, parse_args, scan_pattern, CliOptions};
 use serde::Serialize;
@@ -294,6 +294,19 @@ fn read_markdown(state: State<'_, AppState>, id: String) -> Result<String, ReadE
     })
 }
 
+/// ファイル `id` の Markdown 内の画像参照を絶対パスに解決し、そのファイルだけ asset protocol で表示できるようにする。
+/// 開いたファイルのディレクトリ外を `../` で参照する画像のため。
+#[tauri::command]
+fn resolve_markdown_image(app: AppHandle, id: String, reference: String) -> Option<String> {
+    let path = app.state::<AppState>().registry.get(&id)?;
+    let image = resolve_image(&reference, path.parent()?)?;
+    if let Err(err) = app.asset_protocol_scope().allow_file(&image) {
+        eprintln!("asset scope failed: {}: {err}", image.display());
+        return None;
+    }
+    Some(image.to_string_lossy().into_owned())
+}
+
 /// Excel などバイナリのファイルを、そのままのバイト列で返す (JSON の数値配列にしない)。
 #[tauri::command]
 fn read_bytes(state: State<'_, AppState>, id: String) -> Result<tauri::ipc::Response, ReadError> {
@@ -431,6 +444,7 @@ pub fn run() {
             open_paths,
             read_markdown,
             read_bytes,
+            resolve_markdown_image,
             close_file,
             close_tab,
             save_session

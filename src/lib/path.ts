@@ -1,17 +1,3 @@
-/** Markdown 内の相対パスを、Markdown のあるディレクトリ基準の絶対パスに解決する (POSIX / Windows 両対応)。 */
-export const resolveRelative = (baseDir: string, relative: string): string => {
-  const separator = baseDir.includes("\\") && !baseDir.includes("/") ? "\\" : "/";
-  const segments = baseDir.split(/[\\/]/);
-  const root = segments.shift() ?? ""; // POSIX は "" 、Windows は "C:"
-  const stack = segments.filter((segment) => segment !== "");
-  for (const segment of relative.split(/[\\/]/)) {
-    if (segment === "" || segment === ".") continue;
-    if (segment === "..") stack.pop();
-    else stack.push(segment);
-  }
-  return [root, ...stack].join(separator);
-};
-
 export const dirname = (path: string): string => {
   const index = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
   return index <= 0 ? path.slice(0, index + 1) || "/" : path.slice(0, index);

@@ -46,6 +46,10 @@ export const readBytes = async (id: FileId): Promise<ReadBytesResult> => {
   }
 };
 
+/** ファイル `id` の Markdown 内の画像参照を絶対パスに解決する。見つからなければ null */
+export const resolveMarkdownImage = (id: FileId, reference: string): Promise<string | null> =>
+  invoke("resolve_markdown_image", { id, reference });
+
 export const onOpenFiles = (handler: (event: OpenFilesEvent) => void): Promise<UnlistenFn> =>
   listen<OpenFilesEvent>("open-files", (event) => handler(event.payload));
 
