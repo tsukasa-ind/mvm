@@ -1,4 +1,4 @@
-import { formatNumber } from "./numfmt";
+import { formatNumber, formatText } from "./numfmt";
 import type { Styles } from "./styles";
 import { Layout, type ColSpec } from "./layout";
 import type { CellData, MergeRange } from "./types";
@@ -75,9 +75,10 @@ export const parseSheet = (xml: string, styles: Styles, sst: string[], mdw: numb
       const type = attr(c, "t");
       const v = text(kid(c, "v"));
       let display: string | null = null;
-      if (type === "s") display = sst[Number(v)] ?? "";
-      else if (type === "inlineStr") display = text(kid(kid(c, "is"), "t")) || kids(kid(c, "is"), "r").map((r) => text(kid(r, "t"))).join("");
-      else if (type === "str" || type === "e" || type === "d") display = v;
+      if (type === "s") display = formatText(sst[Number(v)] ?? "", style?.numFmt);
+      else if (type === "inlineStr") display = formatText(text(kid(kid(c, "is"), "t")) || kids(kid(c, "is"), "r").map((r) => text(kid(r, "t"))).join(""), style?.numFmt);
+      else if (type === "str") display = formatText(v, style?.numFmt);
+      else if (type === "e" || type === "d") display = v;
       else if (type === "b") display = v === "1" ? "TRUE" : "FALSE";
       else if (v !== "") display = formatNumber(Number(v), style?.numFmt);
       const hasLook = style !== undefined && (style.fill !== null || Object.values(style.border).some(Boolean));
