@@ -74,11 +74,13 @@ fn expand_target(
     cwd: &Path,
     options: CliOptions,
 ) -> (Vec<PathBuf>, Option<WatchPattern>) {
-    if is_glob(target) {
-        return expand_glob(target, cwd);
-    }
+    // `a[1].md` のように glob 文字を含む実在の名前を glob として解釈しないよう、先にリテラルで解決する
     let Ok(path) = cwd.join(target).canonicalize() else {
-        return (Vec::new(), None);
+        return if is_glob(target) {
+            expand_glob(target, cwd)
+        } else {
+            (Vec::new(), None)
+        };
     };
     if path.is_file() {
         (vec![path], None)
@@ -96,11 +98,16 @@ fn expand_target(
 }
 
 /// glob の固定部分 (ワイルドカードを含まない先頭のディレクトリ) を正規化し、残りを連結した絶対パターンを作る。
+/// cwd は入力されたパターンではないため、`[` などを含む名前でもリテラルとして扱う。
 fn expand_glob(target: &str, cwd: &Path) -> (Vec<PathBuf>, Option<WatchPattern>) {
-    let absolute = cwd.join(target);
-    let mut base = PathBuf::new();
+    let target_path = Path::new(target);
+    let mut base = if target_path.is_absolute() {
+        PathBuf::new()
+    } else {
+        cwd.to_path_buf()
+    };
     let mut rest = PathBuf::new();
-    for component in absolute.components() {
+    for component in target_path.components() {
         let has_wildcard =
             matches!(component, Component::Normal(name) if is_glob(&name.to_string_lossy()));
         if has_wildcard || !rest.as_os_str().is_empty() {
@@ -115,7 +122,12 @@ fn expand_glob(target: &str, cwd: &Path) -> (Vec<PathBuf>, Option<WatchPattern>)
     if !base.is_dir() || rest.as_os_str().is_empty() {
         return (Vec::new(), None);
     }
-    let pattern_string = base.join(&rest).to_string_lossy().into_owned();
+    // 固定部分に含まれる glob 文字は、パターンとして解釈されないようエスケープする
+    let escaped_base = glob::Pattern::escape(&base.to_string_lossy());
+    let pattern_string = PathBuf::from(escaped_base)
+        .join(&rest)
+        .to_string_lossy()
+        .into_owned();
     let recursive = rest.components().count() > 1;
     let pattern = WatchPattern {
         base,
@@ -278,6 +290,22 @@ mod tests {
         );
         assert_eq!(expansion.files, vec![root.join("a.md"), root.join("b.txt")]);
         assert!(expansion.patterns.is_empty());
+    }
+
+    #[test]
+    fn glob_characters_in_cwd_and_file_names_are_literal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap().join("proj[1]");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.md"), "x").unwrap();
+        fs::write(root.join("b[1].md"), "x").unwrap();
+
+        let globbed = expand(&args(&["*.md"]), &root, CliOptions::default());
+        assert_eq!(globbed.files, vec![root.join("a.md"), root.join("b[1].md")]);
+        assert!(!globbed.patterns[0].recursive);
+
+        let literal = expand(&args(&["b[1].md"]), &root, CliOptions::default());
+        assert_eq!(literal.files, vec![root.join("b[1].md")]);
     }
 
     #[test]

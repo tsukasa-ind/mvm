@@ -76,7 +76,7 @@ export const Viewer = ({ entry, settings, raw, onOpenRelative }: Props) => {
         );
       }
       const baseDir = dirname(entry.file.path);
-      return <LoadedDocument content={entry.content} fileId={entry.file.id} settings={settings} onOpenRelative={(path) => onOpenRelative(baseDir, path)} />;
+      return <LoadedDocument key={entry.file.id} content={entry.content} fileId={entry.file.id} settings={settings} onOpenRelative={(path) => onOpenRelative(baseDir, path)} />;
     }
     default:
       return assertNever(entry);

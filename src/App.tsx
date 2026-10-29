@@ -18,6 +18,8 @@ import { initialState, reducer } from "./state/reducer";
 const THEME_LABEL = { system: "自動", light: "ライト", dark: "ダーク" } as const;
 const SESSION_SAVE_DELAY_MS = 300;
 
+const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
 export const App = () => {
   const [state, dispatch] = useReducer(reducer, initialState);
   const { mode, cycle } = useTheme();
@@ -25,6 +27,8 @@ export const App = () => {
   const [raw, setRaw] = useState(false);
   const [restored, setRestored] = useState(false);
   const [dragging, setDragging] = useState(false);
+  // 起動処理やドロップの失敗を、表示領域の上に知らせる (描画中の例外は ErrorBoundary が扱う)
+  const [appError, setAppError] = useState<string | null>(null);
   // 非同期のコールバックから、最新のアクティブなタブとタブ一覧を参照する
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -78,51 +82,75 @@ export const App = () => {
   useEffect(() => {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
+    const errors: string[] = [];
+
+    // 1つのリスナーの登録に失敗しても、残りの登録とセッションの復元は続ける。
+    // 登録できたものは、アンマウント済みなら即座に、そうでなければ cleanup で必ず解除する
+    const register = async (label: string, subscribe: () => Promise<() => void>) => {
+      try {
+        const unlisten = await subscribe();
+        if (disposed) unlisten();
+        else unlisteners.push(unlisten);
+      } catch (error) {
+        errors.push(`${label}: ${errorMessage(error)}`);
+      }
+    };
 
     const setup = async () => {
-      const unlistenOpen = await onOpenFiles((event) => {
-        track(event.files);
-        // --tab だけを指定した起動など、ファイルが空でもタブの作成と選択は反映する
-        dispatch({ type: "filesOpened", files: event.files, tabId: event.tabId, select: event.select });
-        for (const file of event.files) void load(file.id);
-      });
-      const unlistenChanged = await onFileChanged((id) => void load(id));
-      const unlistenDrop = await getCurrentWebview().onDragDropEvent(async (event) => {
-        switch (event.payload.type) {
-          case "enter":
-          case "over":
-            setDragging(true);
-            break;
-          case "leave":
-            setDragging(false);
-            break;
-          case "drop": {
-            setDragging(false);
-            // ディレクトリのドロップは配下の Markdown を再帰的に開く
-            openFiles(await openPaths("/", event.payload.paths, true, stateRef.current.activeTabId));
-            break;
+      await register("ファイルを開くイベントの登録", () =>
+        onOpenFiles((event) => {
+          track(event.files);
+          // --tab だけを指定した起動など、ファイルが空でもタブの作成と選択は反映する
+          dispatch({ type: "filesOpened", files: event.files, tabId: event.tabId, select: event.select });
+          for (const file of event.files) void load(file.id);
+        }),
+      );
+      await register("ファイル変更の監視の登録", () => onFileChanged((id) => void load(id)));
+      await register("ドラッグ&ドロップの登録", () =>
+        getCurrentWebview().onDragDropEvent(async (event) => {
+          switch (event.payload.type) {
+            case "enter":
+            case "over":
+              setDragging(true);
+              break;
+            case "leave":
+              setDragging(false);
+              break;
+            case "drop": {
+              setDragging(false);
+              // ディレクトリのドロップは配下の Markdown を再帰的に開く
+              const tabId = stateRef.current.activeTabId;
+              try {
+                openFiles(await openPaths("/", event.payload.paths, true, tabId), tabId);
+              } catch (error) {
+                setAppError(`ドロップしたファイルを開けません: ${errorMessage(error)}`);
+              }
+              break;
+            }
           }
-        }
-      });
-      if (disposed) {
-        unlistenOpen();
-        unlistenChanged();
-        unlistenDrop();
-        return;
-      }
-      unlisteners.push(unlistenOpen, unlistenChanged, unlistenDrop);
+        }),
+      );
+      if (disposed) return;
 
       // リスナー登録後に取得する。起動引数のファイルを取りこぼさない。
       // StrictMode の再マウントで2回呼ばれても、Rust は同じ内容を返す
-      const startup = await getStartup();
-      track(startup.files);
-      dispatch({ type: "sessionRestored", tabs: startup.tabs, activeTabId: startup.activeTabId, files: startup.files });
-      for (const file of startup.files) void load(file.id);
-      if (startup.cliFiles.length > 0) openFiles(startup.cliFiles, startup.cliTab);
-      else if (startup.cliTab !== startup.activeTabId) dispatch({ type: "tabCreated", id: startup.cliTab });
-      setRestored(true);
+      try {
+        const startup = await getStartup();
+        if (disposed) return;
+        track(startup.files);
+        dispatch({ type: "sessionRestored", tabs: startup.tabs, activeTabId: startup.activeTabId, files: startup.files });
+        for (const file of startup.files) void load(file.id);
+        if (startup.cliFiles.length > 0) openFiles(startup.cliFiles, startup.cliTab);
+        else if (startup.cliTab !== startup.activeTabId) dispatch({ type: "tabCreated", id: startup.cliTab });
+        setRestored(true);
+      } catch (error) {
+        // restored は false のままにする。空の状態で保存済みセッションを上書きしないため
+        errors.push(`セッションの復元: ${errorMessage(error)}`);
+      }
     };
-    void setup();
+    void setup().finally(() => {
+      if (!disposed && errors.length > 0) setAppError(`起動処理の一部に失敗しました。\n${errors.join("\n")}`);
+    });
 
     return () => {
       disposed = true;
@@ -145,7 +173,11 @@ export const App = () => {
   }, [state, restored]);
 
   const openRelative = useCallback(
-    async (baseDir: string, path: string) => openFiles(await openPaths(baseDir, [path], false, stateRef.current.activeTabId)),
+    async (baseDir: string, path: string) => {
+      // await 中にタブが切り替わっても、Rust に渡したタブと同じタブへ追加する
+      const tabId = stateRef.current.activeTabId;
+      openFiles(await openPaths(baseDir, [path], false, tabId), tabId);
+    },
     [openFiles],
   );
 
@@ -158,7 +190,8 @@ export const App = () => {
       });
       if (selected === null) return;
       const paths = Array.isArray(selected) ? selected : [selected];
-      openFiles(await openPaths("/", paths, true, stateRef.current.activeTabId));
+      const tabId = stateRef.current.activeTabId;
+      openFiles(await openPaths("/", paths, true, tabId), tabId);
     },
     [openFiles],
   );
@@ -277,7 +310,16 @@ export const App = () => {
             </button>
           </div>
         </header>
+        {appError !== null && (
+          <div role="alert" className="flex items-start gap-2 border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+            <p className="min-w-0 flex-1 whitespace-pre-wrap break-words">{appError}</p>
+            <button type="button" onClick={() => setAppError(null)} aria-label="エラー表示を閉じる" className="shrink-0 rounded px-2 hover:bg-red-100 dark:hover:bg-red-900">
+              ×
+            </button>
+          </div>
+        )}
         <main ref={scrollRef} id={VIEWER_SCROLL_ID} className="min-h-0 flex-1 overflow-y-auto">
+          {/* xlsx の表示が高さいっぱいを使うため h-full に固定する。Markdown の内容の伸びは useScrollMemory が子要素で検知する */}
           <div ref={contentRef} className="h-full">
             <ErrorBoundary resetKey={tab.activeFileId ?? ""}>
               <Viewer entry={activeEntry} settings={settings} raw={raw} onOpenRelative={(baseDir, path) => void openRelative(baseDir, path)} />

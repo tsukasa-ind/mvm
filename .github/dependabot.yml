@@ -1,0 +1,11 @@
+# ワークフローの action は SHA で固定している。固定した SHA の更新を Dependabot に任せる。
+# dtolnay/rust-toolchain は stable ブランチを固定しているため、Dependabot の更新対象外になる (手動で更新する)。
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]

@@ -1,4 +1,4 @@
-import { formatNumber } from "./numfmt";
+import { formatNumber, formatText } from "./numfmt";
 import type { Styles } from "./styles";
 import { Layout, type ColSpec } from "./layout";
 import type { CellData, MergeRange } from "./types";
@@ -58,20 +58,27 @@ export const parseSheet = (xml: string, styles: Styles, sst: string[], mdw: numb
   const cells: CellData[] = [];
   let maxRow = 0;
   let maxCol = 0;
+  let lastRow = 0;
   for (const row of kids(kid(root, "sheetData"), "row")) {
-    const rIdx = num(row, "r", 0);
+    // r 属性は省略できる。省略時は直前の行の次の行
+    const rIdx = num(row, "r", lastRow + 1);
+    lastRow = rIdx;
+    let nextCol = 0;
     if (flag(row, "hidden")) rowPx.set(rIdx, 0);
     else if (attr(row, "ht") !== null) rowPx.set(rIdx, Math.round(num(row, "ht", 15) * PT_TO_PX));
     for (const c of kids(row, "c")) {
-      const ref = parseRef(attr(c, "r") ?? "A1");
+      const refAttr = attr(c, "r");
+      const ref = refAttr !== null ? parseRef(refAttr) : { r: rIdx - 1, c: nextCol };
+      nextCol = ref.c + 1;
       const xf = num(c, "s", 0);
       const style = styles.xfs[xf];
       const type = attr(c, "t");
       const v = text(kid(c, "v"));
       let display: string | null = null;
-      if (type === "s") display = sst[Number(v)] ?? "";
-      else if (type === "inlineStr") display = text(kid(kid(c, "is"), "t")) || kids(kid(c, "is"), "r").map((r) => text(kid(r, "t"))).join("");
-      else if (type === "str" || type === "e") display = v;
+      if (type === "s") display = formatText(sst[Number(v)] ?? "", style?.numFmt);
+      else if (type === "inlineStr") display = formatText(text(kid(kid(c, "is"), "t")) || kids(kid(c, "is"), "r").map((r) => text(kid(r, "t"))).join(""), style?.numFmt);
+      else if (type === "str") display = formatText(v, style?.numFmt);
+      else if (type === "e" || type === "d") display = v;
       else if (type === "b") display = v === "1" ? "TRUE" : "FALSE";
       else if (v !== "") display = formatNumber(Number(v), style?.numFmt);
       const hasLook = style !== undefined && (style.fill !== null || Object.values(style.border).some(Boolean));

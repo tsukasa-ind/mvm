@@ -266,7 +266,11 @@ export const parseDrawing = (xml: string, ctx: DrawingContext): { nodes: DrawNod
     const content = kids(anchor).find((c) => ["sp", "grpSp", "cxnSp", "pic", "graphicFrame"].includes(c.localName));
     if (!content) continue;
 
-    const intText = (el: Element | null, name: string): number => Number(text(kid(el, name))) || 0;
+    // 1e999 などの非有限値は 0 にする。col / row は Layout 側で Excel の上限に丸める
+    const intText = (el: Element | null, name: string): number => {
+      const value = Number(text(kid(el, name)));
+      return Number.isFinite(value) ? value : 0;
+    };
     const pos = (el: Element | null) => ({
       x: ctx.layout.x(intText(el, "col")) + intText(el, "colOff") / EMU_PX,
       y: ctx.layout.y(intText(el, "row")) + intText(el, "rowOff") / EMU_PX,

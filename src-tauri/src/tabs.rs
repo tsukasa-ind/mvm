@@ -4,17 +4,22 @@
 //! 監視パターンと閉じた履歴はタブ単位で持ち、タブを閉じると一緒に消える。
 
 use crate::pattern::WatchPattern;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 type Key = (String, PathBuf);
+
+/// 閉じた履歴の上限。任意の `tab_id` で `close_file` を呼べるため、上限がないとセッションが際限なく増える。
+/// 超えたら古いものから捨てる (捨てたファイルは監視パターンが再び開きうる)
+pub const MAX_CLOSED_FILES: usize = 1000;
 
 #[derive(Default)]
 pub struct Tabs {
     /// タブが持つファイル
     members: HashSet<Key>,
-    /// タブで閉じたファイル。そのタブの監視パターンが再度開かないようにする
-    closed: HashSet<Key>,
+    /// タブで閉じたファイルと、閉じた順の通し番号。そのタブの監視パターンが再度開かないようにする
+    closed: HashMap<Key, u64>,
+    next_closed: u64,
     patterns: Vec<WatchPattern>,
 }
 
@@ -23,12 +28,33 @@ fn key(tab: &str, path: &Path) -> Key {
 }
 
 impl Tabs {
+    /// 古い順に渡す。上限を超えた分は古いものから捨てる。
     pub fn restore_closed(&mut self, closed: impl IntoIterator<Item = (String, PathBuf)>) {
-        self.closed.extend(closed);
+        for key in closed {
+            self.record_closed(key);
+        }
     }
 
+    /// 閉じた履歴を古い順に返す。
     pub fn closed(&self) -> Vec<(String, PathBuf)> {
-        self.closed.iter().cloned().collect()
+        let mut entries: Vec<(&Key, &u64)> = self.closed.iter().collect();
+        entries.sort_by_key(|(_, order)| **order);
+        entries.into_iter().map(|(key, _)| key.clone()).collect()
+    }
+
+    fn record_closed(&mut self, key: Key) {
+        self.closed.insert(key, self.next_closed);
+        self.next_closed += 1;
+        if self.closed.len() > MAX_CLOSED_FILES {
+            if let Some(oldest) = self
+                .closed
+                .iter()
+                .min_by_key(|(_, order)| **order)
+                .map(|(key, _)| key.clone())
+            {
+                self.closed.remove(&oldest);
+            }
+        }
     }
 
     pub fn patterns(&self) -> Vec<WatchPattern> {
@@ -45,20 +71,49 @@ impl Tabs {
         self.members.iter().any(|(_, member)| member == path)
     }
 
-    /// パターンを `tab` のものとして登録する。同じ (パターン, タブ) が既にあれば false。
-    pub fn add_pattern(&mut self, tab: &str, mut pattern: WatchPattern) -> bool {
-        pattern.tab = tab.to_string();
-        if self.patterns.contains(&pattern) {
+    /// 監視パターンによる自動追加。判定 (`pending_additions`) の後にタブが閉じられた・ファイルが閉じられた場合に
+    /// タブを復活させたり閉じた履歴を消したりしないよう、加える直前に同じロック内で再判定する。加えたら true。
+    pub fn add_pending(&mut self, tab: &str, path: &Path) -> bool {
+        let matched = self
+            .patterns
+            .iter()
+            .any(|pattern| pattern.tab == tab && pattern.matches(path));
+        if !matched || !self.should_add(tab, path) {
             return false;
         }
-        self.patterns.push(pattern);
+        self.members.insert(key(tab, path));
         true
+    }
+
+    /// パターンを `tab` のものとして登録する。同じ (パターン, タブ) が既にあれば false。
+    #[cfg(test)]
+    pub fn add_pattern(&mut self, tab: &str, pattern: WatchPattern) -> bool {
+        self.add_pattern_with(tab, pattern, |_| Ok::<(), ()>(()))
+            .unwrap()
+    }
+
+    /// 新しいパターンなら `watch` で監視を始め、成功したときだけ `tab` のものとして登録する。
+    /// 監視に失敗したパターンを登録すると、タブを閉じたときの `unwatch_dir` が他の用途の参照数を減らすため。
+    /// 同じ (パターン, タブ) が既にあれば `watch` を呼ばずに Ok(false)。
+    pub fn add_pattern_with<E>(
+        &mut self,
+        tab: &str,
+        mut pattern: WatchPattern,
+        watch: impl FnOnce(&WatchPattern) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        pattern.tab = tab.to_string();
+        if self.patterns.contains(&pattern) {
+            return Ok(false);
+        }
+        watch(&pattern)?;
+        self.patterns.push(pattern);
+        Ok(true)
     }
 
     /// タブからファイルを外し、閉じた履歴に記録する。どのタブも持たなくなったら true。
     pub fn close_file(&mut self, tab: &str, path: &Path) -> bool {
         self.members.remove(&key(tab, path));
-        self.closed.insert(key(tab, path));
+        self.record_closed(key(tab, path));
         !self.is_referenced(path)
     }
 
@@ -68,7 +123,7 @@ impl Tabs {
             .into_iter()
             .partition(|pattern| pattern.tab == tab);
         self.patterns = kept;
-        self.closed.retain(|(owner, _)| owner != tab);
+        self.closed.retain(|(owner, _), _| owner != tab);
         let owned: Vec<PathBuf> = self
             .members
             .iter()
@@ -86,7 +141,7 @@ impl Tabs {
     /// パターンが `tab` に加えるべきファイルか。タブが持っている、またはタブで閉じたものは対象外。
     pub fn should_add(&self, tab: &str, path: &Path) -> bool {
         let key = key(tab, path);
-        !self.members.contains(&key) && !self.closed.contains(&key)
+        !self.members.contains(&key) && !self.closed.contains_key(&key)
     }
 
     /// 変更されたパスのうち、パターンに一致して、そのタブへ加えるべき (タブ, パス)。
@@ -204,5 +259,76 @@ mod tests {
         assert!(tabs.is_referenced(shared));
         assert!(tabs.closed().is_empty());
         assert_eq!(tabs.patterns().len(), 1);
+    }
+
+    #[test]
+    fn pattern_is_registered_only_when_watch_succeeds() {
+        let mut tabs = Tabs::default();
+        assert_eq!(
+            tabs.add_pattern_with("a", pattern("/d"), |_| Err("ENOSPC")),
+            Err("ENOSPC")
+        );
+        assert!(tabs.patterns().is_empty());
+        // 失敗後の再試行では監視をやり直す
+        let mut watched = 0;
+        let result = tabs.add_pattern_with("a", pattern("/d"), |_| {
+            watched += 1;
+            Ok::<(), &str>(())
+        });
+        assert_eq!(result, Ok(true));
+        // 登録済みなら監視しない (参照数を増やさない)
+        let result = tabs.add_pattern_with("a", pattern("/d"), |_| {
+            watched += 1;
+            Ok::<(), &str>(())
+        });
+        assert_eq!(result, Ok(false));
+        assert_eq!(watched, 1);
+        assert_eq!(tabs.patterns().len(), 1);
+    }
+
+    #[test]
+    fn pending_addition_is_dropped_after_the_tab_is_closed() {
+        let mut tabs = Tabs::default();
+        let path = PathBuf::from("/d/new.md");
+        tabs.add_pattern("a", pattern("/d"));
+        assert_eq!(tabs.pending_additions(std::slice::from_ref(&path)).len(), 1);
+        tabs.close_tab("a");
+        assert!(!tabs.add_pending("a", &path));
+        assert!(!tabs.is_referenced(&path));
+    }
+
+    #[test]
+    fn pending_addition_keeps_a_file_closed_in_the_meantime() {
+        let mut tabs = Tabs::default();
+        let path = PathBuf::from("/d/new.md");
+        tabs.add_pattern("a", pattern("/d"));
+        assert_eq!(tabs.pending_additions(std::slice::from_ref(&path)).len(), 1);
+        tabs.close_file("a", &path);
+        assert!(!tabs.add_pending("a", &path));
+        assert!(!tabs.should_add("a", &path)); // 閉じた履歴は残る
+        assert!(tabs.add_pending("a", Path::new("/d/other.md")));
+        assert!(tabs.is_referenced(Path::new("/d/other.md")));
+        assert!(!tabs.add_pending("a", Path::new("/elsewhere/x.md")));
+    }
+
+    #[test]
+    fn closed_history_keeps_the_most_recent_entries() {
+        let mut tabs = Tabs::default();
+        let path = |i: usize| PathBuf::from(format!("/d/{i}.md"));
+        tabs.restore_closed((0..MAX_CLOSED_FILES).map(|i| ("a".to_string(), path(i))));
+        tabs.close_file("a", &path(MAX_CLOSED_FILES));
+        tabs.close_file("a", &path(1)); // 閉じ直すと新しい扱い
+        tabs.close_file("a", &path(MAX_CLOSED_FILES + 1));
+        let closed = tabs.closed();
+        assert_eq!(closed.len(), MAX_CLOSED_FILES);
+        assert!(!closed.contains(&("a".to_string(), path(0))));
+        assert!(!closed.contains(&("a".to_string(), path(2))));
+        assert_eq!(
+            closed[closed.len() - 2..],
+            [
+                ("a".to_string(), path(1)),
+                ("a".to_string(), path(MAX_CLOSED_FILES + 1))
+            ]
+        );
     }
 }

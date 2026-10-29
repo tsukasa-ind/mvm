@@ -12,10 +12,66 @@ export const isRestored = (scrollTop: number, target: number, scrollHeight: numb
   return reachable && Math.abs(scrollTop - target) < 1;
 };
 
+export type RestoreHandle = {
+  /** 復元中か。復元中の scroll イベントは位置の保存対象にしない */
+  isRestoring: () => boolean;
+  /** 復元を打ち切り、監視を解除する */
+  dispose: () => void;
+};
+
+/**
+ * scroller のスクロール位置を target に合わせる。内容は非同期に描画され、画像や Mermaid の図で高さが後から変わるため、
+ * 目標に届くまで内容のサイズ変化のたびに再適用する。ユーザーの操作、到達、時間切れのいずれかで終わる。
+ *
+ * content (App の `h-full` の div) はスクロール領域と同じ高さに固定され、内容が伸びても自身のサイズは変わらない。
+ * そのため content の子要素 (Viewer が描画する実際の内容) を観測し、子の入れ替えは MutationObserver で追従する。
+ */
+export const restoreScroll = (scroller: HTMLElement, content: HTMLElement, target: number): RestoreHandle => {
+  let restoring = true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let resizeObserver: ResizeObserver | undefined;
+  let mutationObserver: MutationObserver | undefined;
+
+  const finish = () => {
+    if (!restoring) return;
+    restoring = false;
+    resizeObserver?.disconnect();
+    mutationObserver?.disconnect();
+    if (timer !== undefined) clearTimeout(timer);
+    for (const name of USER_EVENTS) scroller.removeEventListener(name, finish);
+  };
+
+  const done = () => isRestored(scroller.scrollTop, target, scroller.scrollHeight, scroller.clientHeight);
+  const apply = () => {
+    if (!restoring) return;
+    if (!done()) scroller.scrollTop = target;
+    if (done()) finish();
+  };
+
+  // 観測対象を content と現在の子要素に合わせる。外れた子は disconnect でまとめて解除する
+  const observeChildren = () => {
+    if (resizeObserver === undefined) return;
+    resizeObserver.disconnect();
+    resizeObserver.observe(content);
+    for (const child of Array.from(content.children)) resizeObserver.observe(child);
+  };
+
+  for (const name of USER_EVENTS) scroller.addEventListener(name, finish, { passive: true });
+  resizeObserver = new ResizeObserver(apply);
+  mutationObserver = new MutationObserver(() => {
+    observeChildren();
+    apply();
+  });
+  mutationObserver.observe(content, { childList: true });
+  observeChildren();
+  timer = setTimeout(finish, RESTORE_TIMEOUT_MS);
+  apply();
+
+  return { isRestoring: () => restoring, dispose: finish };
+};
+
 /**
  * ファイル(key)ごとにスクロール位置を覚え、ファイルを切り替えたときに復元する。
- * 内容は非同期に描画され、画像や Mermaid の図で高さが後から変わるため、
- * 目標に届くまで内容のサイズ変化のたびに再適用する。
  */
 export const useScrollMemory = (scrollRef: RefObject<HTMLElement | null>, contentRef: RefObject<HTMLElement | null>, key: string | null) => {
   const positions = useRef(new Map<string, number>());
@@ -28,38 +84,17 @@ export const useScrollMemory = (scrollRef: RefObject<HTMLElement | null>, conten
     if (scroller === null || content === null) return;
 
     const target = key === null ? 0 : (positions.current.get(key) ?? 0);
-    let restoring = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let observer: ResizeObserver | undefined;
-
-    const finish = () => {
-      restoring = false;
-      observer?.disconnect();
-      if (timer !== undefined) clearTimeout(timer);
-      for (const name of USER_EVENTS) scroller.removeEventListener(name, finish);
-    };
-
-    const done = () => isRestored(scroller.scrollTop, target, scroller.scrollHeight, scroller.clientHeight);
-    const apply = () => {
-      if (!done()) scroller.scrollTop = target;
-      if (done()) finish();
-    };
-
+    // scroll イベントは非同期に届くため、復元で設定した scrollTop による scroll も isRestoring で除外できる
+    const restore = restoreScroll(scroller, content, target);
     const onScroll = () => {
       // 復元中の scroll イベントは、位置の保存対象にしない
-      if (!restoring && key !== null) positions.current.set(key, scroller.scrollTop);
+      if (!restore.isRestoring() && key !== null) positions.current.set(key, scroller.scrollTop);
     };
-
     scroller.addEventListener("scroll", onScroll);
-    for (const name of USER_EVENTS) scroller.addEventListener(name, finish, { passive: true });
-    observer = new ResizeObserver(apply);
-    observer.observe(content);
-    timer = setTimeout(finish, RESTORE_TIMEOUT_MS);
-    apply();
 
     return () => {
       scroller.removeEventListener("scroll", onScroll);
-      finish();
+      restore.dispose();
     };
   }, [scrollRef, contentRef, key]);
 };

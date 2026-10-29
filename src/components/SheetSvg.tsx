@@ -170,11 +170,9 @@ const EDGE_DASH: Record<string, string> = { dashed: "4 2", mediumDashed: "5 3", 
 const CellLayer = ({ sheet, styles }: { sheet: SheetModel; styles: Styles }) => {
   const { colX, rowY } = sheet;
   const mergeOf = new Map<string, { r2: number; c2: number }>();
-  const covered = new Set<string>();
-  for (const m of sheet.merges) {
-    mergeOf.set(`${m.r1},${m.c1}`, { r2: m.r2, c2: m.c2 });
-    for (let r = m.r1; r <= m.r2; r++) for (let c = m.c1; c <= m.c2; c++) if (r !== m.r1 || c !== m.c1) covered.add(`${r},${c}`);
-  }
+  for (const m of sheet.merges) mergeOf.set(`${m.r1},${m.c1}`, { r2: m.r2, c2: m.c2 });
+  // 結合範囲を全セルの Set に展開すると、A1:XFD1048576 のような範囲で描画が終わらないため、セルごとに範囲で判定する
+  const isCovered = (r: number, c: number) => sheet.merges.some((m) => r >= m.r1 && r <= m.r2 && c >= m.c1 && c <= m.c2 && (r !== m.r1 || c !== m.c1));
   const textAt = new Set(sheet.cells.filter((c) => c.text !== null).map((c) => `${c.r},${c.c}`));
   const colAt = (c: number) => colX[Math.min(c, colX.length - 1)] ?? 0;
   const rowAt = (r: number) => rowY[Math.min(r, rowY.length - 1)] ?? 0;
@@ -183,7 +181,8 @@ const CellLayer = ({ sheet, styles }: { sheet: SheetModel; styles: Styles }) => 
   const borders: ReactNode[] = [];
   const texts: ReactNode[] = [];
   sheet.cells.forEach((cell, i) => {
-    const style = styles.xfs[cell.xf];
+    // 範囲外の書式 ID は、Excel と同じく既定の書式 (0) として扱う
+    const style = styles.xfs[cell.xf] ?? styles.xfs[0];
     if (!style) return;
     const merge = mergeOf.get(`${cell.r},${cell.c}`);
     const x = colAt(cell.c);
@@ -197,7 +196,7 @@ const CellLayer = ({ sheet, styles }: { sheet: SheetModel; styles: Styles }) => 
       const e = style.border[side as "left"];
       if (e) borders.push(<line key={`${i}${side}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={e.color} strokeWidth={EDGE_WIDTH[e.style] ?? 1} strokeDasharray={EDGE_DASH[e.style]} />);
     }
-    if (cell.text === null || covered.has(`${cell.r},${cell.c}`)) return;
+    if (cell.text === null || isCovered(cell.r, cell.c)) return;
     const align = style.horizontal && style.horizontal !== "general" ? style.horizontal : cell.isNumber ? "right" : "left";
     // 折り返さない左寄せの文字は、右隣が空のセルの間は溢れて表示する
     let extra = 0;

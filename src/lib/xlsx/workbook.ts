@@ -62,8 +62,20 @@ const bounds = (nodes: DrawNode[]): { w: number; h: number } => {
   return { w, h };
 };
 
+const MAX_ENTRY_BYTES = 64 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 256 * 1024 * 1024;
+
 export const loadWorkbook = (bytes: Uint8Array): Workbook => {
-  const files = unzipSync(bytes);
+  // zip bomb で展開時にメモリを使い切らないよう、ファイル単位と合計の展開サイズを制限する
+  let total = 0;
+  const files = unzipSync(bytes, {
+    filter: (file) => {
+      total += file.originalSize;
+      if (file.originalSize > MAX_ENTRY_BYTES || total > MAX_TOTAL_BYTES) throw new Error("xlsx の展開後のサイズが大きすぎます");
+      return true;
+    },
+  });
+  const dataUris = new Map<string, string>();
   const read = (path: string): string | null => (files[path] ? decoder.decode(files[path]) : null);
   const workbookXml = read("xl/workbook.xml");
   if (!workbookXml) throw new Error("xl/workbook.xml がありません (xlsx ではありません)");
@@ -103,7 +115,14 @@ export const loadWorkbook = (bytes: Uint8Array): Workbook => {
           const path = drawingRels.get(rid);
           const data = path ? files[path] : undefined;
           const mime = path ? MIME[path.split(".").pop()!.toLowerCase()] : undefined;
-          return data && mime ? `data:${mime};base64,${toBase64(data)}` : null;
+          if (!path || !data || !mime) return null;
+          // 同じ画像を何度も参照するファイルで、data URI を複製しない
+          let uri = dataUris.get(path);
+          if (uri === undefined) {
+            uri = `data:${mime};base64,${toBase64(data)}`;
+            dataUris.set(path, uri);
+          }
+          return uri;
         },
       });
       nodes = result.nodes;

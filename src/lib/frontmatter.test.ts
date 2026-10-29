@@ -24,4 +24,24 @@ describe("splitFrontmatter", () => {
     const text = "---\na: 1\n---\n本文\n\n---\n\n続き";
     expect(splitFrontmatter(text).body).toBe("本文\n\n---\n\n続き");
   });
+
+  it("先頭が水平線の文書は frontmatter として扱わない", () => {
+    const text = "---\n\n本文A\n\n---\n本文B\n";
+    expect(splitFrontmatter(text)).toEqual({ frontmatter: null, body: text });
+  });
+
+  it("開始行の直後が空行、または `key:` 形式でない場合は frontmatter として扱わない", () => {
+    expect(splitFrontmatter("---\n\ntitle: A\n---\n本文").frontmatter).toBeNull();
+    expect(splitFrontmatter("---\n本文A\n---\n本文B").frontmatter).toBeNull();
+    expect(splitFrontmatter("---\n- a\n- b\n---\n本文").frontmatter).toBeNull();
+    expect(splitFrontmatter("---\n# 見出し\n---\n本文").frontmatter).toBeNull();
+    expect(splitFrontmatter("---\nhttps://example.com\n---\n本文").frontmatter).toBeNull();
+  });
+
+  it("YAML らしい内容なら、途中の空行や値なしのキーを含んでも frontmatter とする", () => {
+    expect(splitFrontmatter("---\ntitle: A\n\ntags:\n  - x\n---\n本文")).toEqual({ frontmatter: "title: A\n\ntags:\n  - x", body: "本文" });
+    expect(splitFrontmatter("---\nタイトル: 日本語のキー\n---\n本文").frontmatter).toBe("タイトル: 日本語のキー");
+    expect(splitFrontmatter('---\n"quoted key": 1\n---\n本文').frontmatter).toBe('"quoted key": 1');
+    expect(splitFrontmatter("---\r\ndraft:\r\n---\r\n本文")).toEqual({ frontmatter: "draft:", body: "本文" });
+  });
 });

@@ -73,3 +73,18 @@ describe("markdownToHast (M2)", () => {
     expect(headings.map((heading) => heading.id)).toEqual(["同じ", "同じ-1"]);
   });
 });
+
+describe("脚注と見出し", () => {
+  it("脚注の参照先と戻り先の id が href と一致する", async () => {
+    const elements = await render("a[^1]\n\n[^1]: note\n");
+    const ids = new Set(elements.map((element) => element.properties.id).filter((id): id is string => typeof id === "string"));
+    const hrefs = elements.map((element) => element.properties.href).filter((href): href is string => typeof href === "string" && href.startsWith("#"));
+    expect(hrefs.length).toBeGreaterThan(0);
+    for (const href of hrefs) expect(ids.has(href.slice(1))).toBe(true);
+  });
+
+  it("数式を含む見出しのテキストを重複させない", async () => {
+    const tree = await markdownToHast("## Energy $E=mc^2$\n");
+    expect(extractHeadings(tree)[0]?.text).toBe("Energy E=mc2");
+  });
+});

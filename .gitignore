@@ -4,3 +4,5 @@ target/
 src-tauri/gen/
 .direnv/
 .serena/
+result
+result-*

@@ -1,6 +1,10 @@
 /** 列幅・行高から、セルの座標 (px) を求める。範囲外は既定値で延長する。 */
 export type ColSpec = { min: number; max: number; px: number };
 
+/** Excel の最大列数・行数。壊れたファイルの巨大な添字でメモリを使い切らないための上限 */
+const MAX_COLS = 16384;
+const MAX_ROWS = 1048576;
+
 export class Layout {
   private colX: number[] = [0];
   private rowY: number[] = [0];
@@ -22,11 +26,13 @@ export class Layout {
   }
 
   x(col: number): number {
+    col = Math.min(Math.max(0, Math.trunc(col)), MAX_COLS);
     while (this.colX.length <= col) this.colX.push((this.colX[this.colX.length - 1] ?? 0) + this.colWidth(this.colX.length - 1));
     return this.colX[col] ?? 0;
   }
 
   y(row: number): number {
+    row = Math.min(Math.max(0, Math.trunc(row)), MAX_ROWS);
     while (this.rowY.length <= row) this.rowY.push((this.rowY[this.rowY.length - 1] ?? 0) + this.rowHeight(this.rowY.length - 1));
     return this.rowY[row] ?? 0;
   }
