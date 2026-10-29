@@ -1,0 +1,3 @@
+overrides:
+  # mermaid 12.1.0 が依存する dompurify 3.4.16 以下に XSS の脆弱性があるため、修正版に固定する
+  dompurify: ">=3.4.17"

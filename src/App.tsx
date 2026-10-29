@@ -99,7 +99,8 @@ export const App = () => {
           case "drop": {
             setDragging(false);
             // ディレクトリのドロップは配下の Markdown を再帰的に開く
-            openFiles(await openPaths("/", event.payload.paths, true, stateRef.current.activeTabId));
+            const tabId = stateRef.current.activeTabId;
+            openFiles(await openPaths("/", event.payload.paths, true, tabId), tabId);
             break;
           }
         }
@@ -145,7 +146,11 @@ export const App = () => {
   }, [state, restored]);
 
   const openRelative = useCallback(
-    async (baseDir: string, path: string) => openFiles(await openPaths(baseDir, [path], false, stateRef.current.activeTabId)),
+    async (baseDir: string, path: string) => {
+      // await 中にタブが切り替わっても、Rust に渡したタブと同じタブへ追加する
+      const tabId = stateRef.current.activeTabId;
+      openFiles(await openPaths(baseDir, [path], false, tabId), tabId);
+    },
     [openFiles],
   );
 
@@ -158,7 +163,8 @@ export const App = () => {
       });
       if (selected === null) return;
       const paths = Array.isArray(selected) ? selected : [selected];
-      openFiles(await openPaths("/", paths, true, stateRef.current.activeTabId));
+      const tabId = stateRef.current.activeTabId;
+      openFiles(await openPaths("/", paths, true, tabId), tabId);
     },
     [openFiles],
   );

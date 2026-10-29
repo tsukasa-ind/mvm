@@ -48,16 +48,20 @@ fn default_tab() -> String {
 impl WatchPattern {
     pub fn matches(&self, path: &Path) -> bool {
         match &self.glob {
-            Some(pattern) => glob::Pattern::new(pattern).is_ok_and(|pattern| {
-                pattern.matches_path_with(
-                    path,
-                    MatchOptions {
-                        case_sensitive: true,
-                        require_literal_separator: true,
-                        require_literal_leading_dot: true,
-                    },
-                )
-            }),
+            // 走査 (scan_pattern) と同じく、開けない種類のファイルと Excel の一時ファイルは対象外にする
+            Some(pattern) => {
+                is_viewable(path)
+                    && glob::Pattern::new(pattern).is_ok_and(|pattern| {
+                        pattern.matches_path_with(
+                            path,
+                            MatchOptions {
+                                case_sensitive: true,
+                                require_literal_separator: true,
+                                require_literal_leading_dot: true,
+                            },
+                        )
+                    })
+            }
             None => is_viewable(path) && self.is_in_scope(path),
         }
     }
@@ -138,5 +142,18 @@ mod tests {
         };
         assert!(deep.matches(Path::new("/docs/sub/a.md")));
         assert!(!deep.matches(Path::new("/docs/sub/a.txt")));
+    }
+
+    #[test]
+    fn glob_pattern_skips_unviewable_files() {
+        let pattern = WatchPattern {
+            base: PathBuf::from("/d"),
+            recursive: false,
+            glob: Some("/d/*".into()),
+            tab: String::new(),
+        };
+        assert!(pattern.matches(Path::new("/d/a.md")));
+        assert!(!pattern.matches(Path::new("/d/a.bin")));
+        assert!(!pattern.matches(Path::new("/d/~$a.xlsx")));
     }
 }

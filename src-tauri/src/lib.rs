@@ -5,8 +5,8 @@ mod session;
 mod tabs;
 mod watcher;
 
-use files::{file_id, resolve_image, resolve_path, OpenedFile, Registry};
-use pattern::WatchPattern;
+use files::{file_id, resolve_image, OpenedFile, Registry};
+use pattern::{is_viewable, WatchPattern};
 use scan::{expand, parse_args, scan_pattern, CliOptions};
 use serde::Serialize;
 use session::{ClosedFile, SessionFile, SessionTab};
@@ -74,7 +74,7 @@ enum ReadError {
     Failed { message: String },
 }
 
-/// ファイルを登録し、親ディレクトリの監視と asset protocol のスコープ追加を行う。
+/// ファイルを登録し、親ディレクトリを監視する。画像の asset protocol の許可は `resolve_markdown_image` が画像ごとに行う。
 /// 明示的に開かれたものとして扱うため、`tab` の閉じた履歴からは外す。
 fn register_file(app: &AppHandle, path: &Path, tab: &str) -> OpenedFile {
     let state = app.state::<AppState>();
@@ -85,12 +85,6 @@ fn register_file(app: &AppHandle, path: &Path, tab: &str) -> OpenedFile {
     let file = state.registry.insert(path);
     if let Err(err) = state.watcher.watch_file(path) {
         eprintln!("watch failed: {}: {err}", path.display());
-    }
-    if let Some(dir) = path.parent() {
-        // 相対パス画像を表示するため、開いたファイルのディレクトリ配下だけ許可する
-        if let Err(err) = app.asset_protocol_scope().allow_directory(dir, true) {
-            eprintln!("asset scope failed: {}: {err}", dir.display());
-        }
     }
     file
 }
@@ -259,12 +253,18 @@ fn open_paths(
     let base = Path::new(&base_dir);
     let mut resolved: Vec<PathBuf> = Vec::new();
     for path in &paths {
-        // 括弧などを含む実在のファイル名を glob として解釈しないよう、先にリテラルで解決する
-        let expanded = match resolve_path(path, base) {
-            Some(file) => vec![file],
-            None => {
+        // glob は解釈しない。Markdown 内の相対リンクが `*` を含んでも、基準外のファイルを開かないため
+        let expanded = match base.join(path).canonicalize() {
+            Ok(target) if target.is_file() => {
+                if is_viewable(&target) {
+                    vec![target]
+                } else {
+                    Vec::new()
+                }
+            }
+            Ok(target) if target.is_dir() => {
                 expand(
-                    std::slice::from_ref(path),
+                    &[target.to_string_lossy().into_owned()],
                     base,
                     CliOptions {
                         recursive,
@@ -273,6 +273,7 @@ fn open_paths(
                 )
                 .files
             }
+            _ => Vec::new(),
         };
         for file in expanded {
             if !resolved.contains(&file) {
@@ -433,7 +434,9 @@ pub fn run() {
                 }
             });
 
-            let args: Vec<String> = std::env::args().collect();
+            let args: Vec<String> = std::env::args_os()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
             let cwd = std::env::current_dir()?;
             let startup = build_startup(app.handle(), &args, &cwd);
             *app.state::<AppState>().startup.lock().unwrap() = Some(startup);

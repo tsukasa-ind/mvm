@@ -55,7 +55,7 @@ flowchart LR
 
 1. **ファイル読み込みと監視は fs プラグインを使わず、自前の Rust コマンドと `notify` で実装する。** `tauri-plugin-fs` は任意パス読み取りにスコープの明示が必要で、任意の Markdown を開く用途ではスコープが広くなる。自前コマンドなら capabilities を最小にできる。`src-tauri/capabilities/*.json` には `core:default` が必要で、変更後は `tauri dev` の再起動が要る(Growi: `/knowledge/libraries/rust/tauri/capabilities`)。
 2. **監視は親ディレクトリ単位で行い、参照カウントで管理する。** 多くのエディタは一時ファイルへの書き込み後に rename で保存するため、ファイル単位の監視では通知が途絶えるおそれがある。監視はタブとは独立し、全タブのファイル集合から導出する。
-3. **相対パス画像は asset protocol で表示する。** `convertFileSrc` で変換し、開いた Markdown のディレクトリだけを実行時にスコープへ追加する。静的スコープに `**/*` は許可しない。
+3. **相対パス画像は asset protocol で表示する。** 参照の解決は Rust の `resolve_markdown_image` が行い(Markdown のディレクトリ基準、`../` 可)、画像の拡張子で、symlink を解決した後の実体が画像であるファイルだけを実行時にスコープへ追加して `convertFileSrc` で表示する。ディレクトリ単位では許可しない。静的スコープに `**/*` は許可しない。
 4. **サニタイズと CSP を有効にする。** `rehype-raw` で生 HTML を通すため `rehype-sanitize` が必須。CSP の `img-src` に `asset:` と `http://asset.localhost` を許可する。Markdown 内のリンクは WebView 内遷移を禁止し、外部 URL は OS のブラウザで開く。
 5. **フロントの状態は discriminated union で表現する。** ファイルは `loading | loaded | missing | error`。ファイル ID は branded type で、絶対パスの SHA-256 先頭8桁とする(mo と同方式)。
 
@@ -138,7 +138,7 @@ Windows 向けビルドは WSL の UNC パス上で行うとコンパイルが�
 - `@shikijs/rehype` は非同期プラグインのため、同期の `react-markdown` では変換に失敗する(描画時に例外となる)。`unified().run()` で hast を得て `hast-util-to-jsx-runtime` で React 要素に変換する。変換は `src/lib/pipeline.ts`(Tauri 非依存、vitest で検証)に分離している。
 - Shiki の Oniguruma は WASM を使うため、CSP の `script-src` に `'wasm-unsafe-eval'` が必要。
 - `ErrorBoundary` を表示領域に置く。描画中の例外でアプリ全体が空白になるのを防ぐ。
-- 実行時の asset スコープ追加は `app.asset_protocol_scope().allow_directory(dir, true)`(Tauri 2.12)。スコープは開いたファイルのディレクトリ配下のみのため、親ディレクトリ(`../img/` など)の画像は表示できない想定(未確認)。
+- 実行時の asset スコープ追加は `app.asset_protocol_scope().allow_file(path)`(Tauri 2.12)。許可は解決済みの画像ファイル単位で、ファイルを閉じても解除しない。
 - 親ディレクトリ監視は、一時ファイルへ書き込んでから rename する保存方式でも live reload が動作する(Linux で確認)。
 - `img-src` は `https:` を許可している。外部画像(README のバッジなど)を表示するためで、リモート画像による閲覧の追跡は許容している。
 

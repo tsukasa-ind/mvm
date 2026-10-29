@@ -20,6 +20,13 @@ const textOf = (node: Nodes): string => {
   return "children" in node ? node.children.map(textOf).join("") : "";
 };
 
+/** 数式は KaTeX が MathML と HTML の両方を出力するため、MathML 側を除いてテキストを重複させない */
+const headingText = (node: Nodes): string => {
+  if (node.type === "text") return node.value;
+  if (node.type === "element" && classNames(node).includes("katex-mathml")) return "";
+  return "children" in node ? node.children.map(headingText).join("") : "";
+};
+
 const classNames = (element: Element): string[] => {
   const value = element.properties.className ?? element.properties.class;
   if (Array.isArray(value)) return value.map(String);
@@ -41,6 +48,10 @@ const replaceMermaid = (node: Nodes) => {
 
 const rehypeMermaid = () => (tree: HastRoot) => replaceMermaid(tree);
 
+// 脚注のリンク先 (user-content-fn-1) は remark-rehype が接頭辞付きで生成するため、
+// sanitize がさらに接頭辞を付けると参照と id が一致しなくなる。見出しの id (rehype-slug) も接頭辞なしなので揃える。
+const sanitizeSchema = { ...defaultSchema, clobberPrefix: "" };
+
 // @shikijs/rehype は非同期プラグインのため、同期の react-markdown ではなく run() で変換する。
 // 生 HTML を通すため sanitize は必須。数式・アラート・Mermaid・Shiki の出力 (style 属性や svg) は
 // sanitize で除去されるため、すべて sanitize の後段に置く。
@@ -50,9 +61,9 @@ const processor = unified()
   .use(remarkMath)
   .use(remarkRehype, { allowDangerousHtml: true })
   .use(rehypeRaw)
-  .use(rehypeSanitize, defaultSchema)
+  .use(rehypeSanitize, sanitizeSchema)
   .use(rehypeSlug)
-  .use(rehypeKatex)
+  .use(rehypeKatex, { maxSize: 50, maxExpand: 200 })
   .use(rehypeGithubAlerts, {})
   .use(rehypeMermaid)
   .use(rehypeShiki, { themes: { light: "github-light", dark: "github-dark" }, defaultColor: false, fallbackLanguage: "text" });
@@ -71,7 +82,7 @@ export const extractHeadings = (tree: Nodes): Heading[] => {
       const match = HEADING_TAGS.exec(node.tagName);
       const id = node.properties.id;
       if (match !== null && typeof id === "string") {
-        headings.push({ id, depth: Number(match[1]), text: textOf(node).trim() });
+        headings.push({ id, depth: Number(match[1]), text: headingText(node).trim() });
         return;
       }
     }

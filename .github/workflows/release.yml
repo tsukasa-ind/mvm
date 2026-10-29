@@ -24,6 +24,13 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+      - name: タグとバージョンの一致を確認
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          grep -q "\"version\": \"$version\"" package.json || { echo "package.json のバージョンがタグ $GITHUB_REF_NAME と一致しない"; exit 1; }
+          grep -q "\"version\": \"$version\"" src-tauri/tauri.conf.json || { echo "tauri.conf.json のバージョンがタグ $GITHUB_REF_NAME と一致しない"; exit 1; }
+          grep -q "^version = \"$version\"" src-tauri/Cargo.toml || { echo "Cargo.toml のバージョンがタグ $GITHUB_REF_NAME と一致しない"; exit 1; }
       - name: Linux 依存パッケージ
         if: matrix.platform == 'ubuntu-latest'
         run: |

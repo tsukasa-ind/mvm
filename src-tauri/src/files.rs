@@ -44,14 +44,15 @@ const IMAGE_EXTENSIONS: [&str; 9] = [
 /// Markdown 内の画像の相対参照を、Markdown のあるディレクトリ `base` 基準で解決する。
 /// 任意ファイルを表示対象にしないよう、画像の拡張子に限る。
 pub fn resolve_image(reference: &str, base: &Path) -> Option<PathBuf> {
-    let extension = Path::new(reference)
-        .extension()?
-        .to_string_lossy()
-        .to_lowercase();
-    if !IMAGE_EXTENSIONS.contains(&extension.as_str()) {
+    if Path::new(reference).is_absolute() {
         return None;
     }
-    resolve_path(reference, base)
+    let resolved = resolve_path(reference, base)?;
+    // symlink の参照先 (`x.png -> /etc/passwd` など) を通さないよう、正規化後のパスで拡張子を検査する
+    let extension = resolved.extension()?.to_string_lossy().to_lowercase();
+    IMAGE_EXTENSIONS
+        .contains(&extension.as_str())
+        .then_some(resolved)
 }
 
 /// id と実パスの対応表。フロントは id だけを渡し、任意パスの読み取りはできない。
@@ -152,6 +153,20 @@ mod tests {
         assert_eq!(resolve_image("b.png", &manual), Some(manual.join("b.png")));
         assert_eq!(resolve_image("../images/missing.png", &manual), None);
         assert_eq!(resolve_image("../images/a.md", &manual), None);
+        assert_eq!(
+            resolve_image(&root.join("doc/images/a.png").to_string_lossy(), &manual),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_image_rejects_symlink_to_non_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::write(root.join("secret.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(root.join("secret.txt"), root.join("x.png")).unwrap();
+        assert_eq!(resolve_image("x.png", &root), None);
     }
 
     #[test]

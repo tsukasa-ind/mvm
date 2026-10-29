@@ -81,7 +81,8 @@ const formatNumeric = (value: number, code: string): string => {
   const v = percent ? value * 100 : value;
   const body = section.replace(/"[^"]*"/g, (q) => `\u0000${q.slice(1, -1)}\u0000`);
   const decimalMatch = /\.([0#?]+)/.exec(body.replace(/\u0000[^\u0000]*\u0000/g, ""));
-  const decimals = decimalMatch ? decimalMatch[1]!.length : 0;
+  // toFixed は 100 桁までのため、極端な書式で例外を出さないよう丸める
+  const decimals = decimalMatch ? Math.min(decimalMatch[1]!.length, 30) : 0;
   const thousands = /[#0?],[#0?]/.test(body) || /[#0?],$/.test(body.split(".")[0] ?? "");
   const minInt = (/([0?]+)(?:\.|$|[^0#?])/.exec(body.split(".")[0]!.replace(/\u0000[^\u0000]*\u0000/g, "")) ?? [])[1]?.length ?? 0;
   const abs = Math.abs(v);
