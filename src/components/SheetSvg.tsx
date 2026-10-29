@@ -232,12 +232,13 @@ const CellLayer = ({ sheet, styles }: { sheet: SheetModel; styles: Styles }) => 
     );
   });
 
-  const grid: ReactNode[] = [];
+  // グリッド線は行・列ごとの <line> にすると要素数が行数 + 列数になるため、1 本の path にまとめる
+  let grid: ReactNode = null;
   if (sheet.showGrid) {
     const right = colX[colX.length - 1] ?? 0;
     const bottom = rowY[rowY.length - 1] ?? 0;
-    colX.forEach((x, i) => grid.push(<line key={`c${i}`} x1={x} y1={0} x2={x} y2={bottom} stroke="rgb(214 217 224)" strokeWidth={1} />));
-    rowY.forEach((y, i) => grid.push(<line key={`r${i}`} x1={0} y1={y} x2={right} y2={y} stroke="rgb(214 217 224)" strokeWidth={1} />));
+    const d = [...colX.map((x) => `M${x} 0V${bottom}`), ...rowY.map((y) => `M0 ${y}H${right}`)].join("");
+    grid = <path d={d} stroke="rgb(214 217 224)" strokeWidth={1} fill="none" />;
   }
   return (
     <>

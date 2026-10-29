@@ -1,5 +1,6 @@
 import { unzipSync } from "fflate";
 import { parseDrawing } from "./drawing";
+import { MAX_RENDER_COLS, MAX_RENDER_ROWS, limitRange } from "./limit";
 import { maxDigitWidth, parseSharedStrings, parseSheet } from "./sheet";
 import { parseStyles, type Styles } from "./styles";
 import { parseTheme, type Theme } from "./theme";
@@ -129,12 +130,14 @@ export const loadWorkbook = (bytes: Uint8Array): Workbook => {
       unsupported = result.unsupported;
     }
 
-    // 描画範囲 (セル・図形の両方を含む)。右下に余白を持たせる
+    // 描画範囲 (セル・図形の両方を含む)。右下に余白を持たせる。セルの範囲は描画の上限に収める
+    const range = limitRange(parsed.cells, parsed.merges, Math.max(parsed.maxRow, 1), Math.max(parsed.maxCol, 1));
+    const colCount = range.cols;
+    const rowCount = range.rows;
+    // 図形の範囲も描画の上限までにする。上限より先の図形のために、シートを広げない
     const b = bounds(nodes);
-    const colCount = Math.max(parsed.maxCol, 1);
-    const rowCount = Math.max(parsed.maxRow, 1);
-    const width = Math.max(parsed.layout.x(colCount), b.w) + 16;
-    const height = Math.max(parsed.layout.y(rowCount), b.h) + 16;
+    const width = Math.max(parsed.layout.x(colCount), Math.min(b.w, parsed.layout.x(MAX_RENDER_COLS))) + 16;
+    const height = Math.max(parsed.layout.y(rowCount), Math.min(b.h, parsed.layout.y(MAX_RENDER_ROWS))) + 16;
     const model: SheetModel = {
       name: def.name,
       width,
@@ -143,10 +146,11 @@ export const loadWorkbook = (bytes: Uint8Array): Workbook => {
       zoom: parsed.zoom,
       colX: parsed.layout.colBounds(colCount),
       rowY: parsed.layout.rowBounds(rowCount),
-      cells: parsed.cells,
-      merges: parsed.merges,
+      cells: range.cells,
+      merges: range.merges,
       nodes,
       unsupported,
+      truncated: range.truncated ? { rows: rowCount, cols: colCount } : null,
     };
     cache.set(index, model);
     return model;

@@ -89,6 +89,9 @@ export const XlsxView = ({ bytes }: Props) => {
         <button type="button" onClick={() => setScale(1)} className="rounded px-2 py-0.5 hover:bg-neutral-200 dark:hover:bg-neutral-800">
           100%
         </button>
+        {sheet?.truncated && (
+          <span className="ml-2 text-xs text-amber-600 dark:text-amber-400">{`大きすぎるため、先頭の ${sheet.truncated.rows.toLocaleString()} 行 × ${sheet.truncated.cols.toLocaleString()} 列だけ表示しています`}</span>
+        )}
         {unsupported.length > 0 && <span className="ml-2 text-xs text-amber-600 dark:text-amber-400">{`未対応: ${unsupported.map(([k, v]) => `${k} ${v}`).join(", ")}`}</span>}
         <span className="ml-auto text-xs text-neutral-500">Ctrl+ホイールで拡大縮小、ドラッグで移動</span>
       </div>
