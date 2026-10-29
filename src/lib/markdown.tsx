@@ -37,19 +37,32 @@ const useBody = (): BodyContext => {
 
 type ImageProps = { reference: string; alt: string; title?: string };
 
+type LocalImageState = { kind: "pending" } | { kind: "ready"; src: string } | { kind: "failed" };
+
+/** 表示できない画像の代わりに出す。alt (なければ参照先) を示し、拡大表示の対象にしない */
+const MissingImage = ({ reference, alt }: { reference: string; alt: string }) => {
+  const text = alt === "" ? reference : alt;
+  return (
+    <span role="img" aria-label={text} title={`画像を表示できません: ${reference}`} className="inline-block rounded border border-dashed border-neutral-400 px-2 py-0.5 text-sm text-neutral-500 dark:border-neutral-600">
+      {text}
+    </span>
+  );
+};
+
 /** ローカル画像。参照先の解決と表示許可を Rust に依頼してから表示する */
 const LocalImage = ({ reference, alt, title }: ImageProps) => {
   const { fileId, setZoom } = useBody();
-  const [src, setSrc] = useState<string | null>(null);
+  const [state, setState] = useState<LocalImageState>({ kind: "pending" });
   useEffect(() => {
     let cancelled = false;
     const resolve = async () => {
       try {
         const path = await resolveMarkdownImage(fileId, safeDecode(splitFragment(reference).path));
-        // 見つからない画像は元の参照のまま表示し、壊れた画像として alt を出す
-        if (!cancelled) setSrc(path === null ? reference : convertFileSrc(path));
+        // 見つからない画像を元の参照のまま <img> に渡すと、WebView が無関係な URL を要求するうえ拡大表示の対象になる
+        if (!cancelled) setState(path === null ? { kind: "failed" } : { kind: "ready", src: convertFileSrc(path) });
       } catch {
-        if (!cancelled) setSrc(reference);
+        // IPC の失敗も、見つからない画像と同じく代替表示にする
+        if (!cancelled) setState({ kind: "failed" });
       }
     };
     void resolve();
@@ -57,8 +70,17 @@ const LocalImage = ({ reference, alt, title }: ImageProps) => {
       cancelled = true;
     };
   }, [fileId, reference]);
-  if (src === null) return null;
-  return <img src={src} alt={alt} title={title} onClick={() => setZoom({ kind: "image", src, alt })} />;
+  switch (state.kind) {
+    case "pending":
+      return null;
+    case "failed":
+      return <MissingImage reference={reference} alt={alt} />;
+    case "ready": {
+      const { src } = state;
+      // 解決できても読み込みに失敗した (壊れたファイルなど) 場合も代替表示にする
+      return <img src={src} alt={alt} title={title} onClick={() => setZoom({ kind: "image", src, alt })} onError={() => setState({ kind: "failed" })} />;
+    }
+  }
 };
 
 const BodyImage = ({ src, alt, title }: JSX.IntrinsicElements["img"]) => {
