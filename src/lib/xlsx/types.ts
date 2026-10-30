@@ -43,4 +43,6 @@ export type SheetModel = {
   nodes: DrawNode[];
   /** 未対応の図形のプリセット名と個数 */
   unsupported: Record<string, number>;
+  /** 描画の上限で切り詰めたときの、表示している行数・列数。切り詰めていなければ null */
+  truncated: { rows: number; cols: number } | null;
 };
