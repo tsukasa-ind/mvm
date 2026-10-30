@@ -86,7 +86,7 @@ NixOS や home-manager では、flake の入力に追加して `overlays.default
 
 - ビルドは `nix/package.nix`(`rustPlatform.buildRustPackage` + `cargo-tauri.hook` + `fetchPnpmDeps`)で行う。deb 形式でバンドルした `.desktop` とアイコンも `share/` に入る。
 - ソースは flake の `self`(Git で追跡しているファイルのみ)。新しいファイルを追加したら `git add` してからビルドする。
-- `pnpm-lock.yaml` を更新したら、`nix/package.nix` の `pnpmDeps.hash` を更新する。`hash = lib.fakeHash;` にしてビルドすると、エラーに正しい値(`got:`)が表示される。CI の `nix` ジョブが `nix build .#default` を実行し、更新漏れを検出する。
+- `pnpm-lock.yaml` を更新したら、`nix/package.nix` の `pnpmDeps.hash` を更新する。`hash = lib.fakeHash;` にしてビルドすると、エラーに正しい値(`got:`)が表示される。CI の Nix ワークフロー(`.github/workflows/nix.yml`)が `nix build .#default` を実行し、更新漏れを検出する。このワークフローは `pnpm-lock.yaml`、`pnpm-workspace.yaml`、`nix/`、`flake.nix`、`flake.lock` の変更時だけ動く。
 - ビルド中に `cargo test` が実行される。
 
 ### `inputs.nixpkgs.follows` を付けない

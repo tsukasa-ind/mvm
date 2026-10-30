@@ -1,0 +1,29 @@
+name: Nix
+
+# nix/package.nix の pnpmDeps.hash は pnpm-lock.yaml と nixpkgs の pnpm に依存する。
+# lock を更新したときの hash の更新漏れを検出する。ビルドに 6〜10 分かかるため、hash に関係するファイルの変更時だけ動かす。
+# それ以外の変更で Nix のビルドだけが壊れた場合 (新しいシステム依存など) は検出しない。必要なら手動で実行する (workflow_dispatch)
+on:
+  push:
+    branches: [master, main]
+    paths: &paths
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - nix/**
+      - flake.nix
+      - flake.lock
+      - .github/workflows/nix.yml
+  pull_request:
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      - run: nix build .#default --print-build-logs
